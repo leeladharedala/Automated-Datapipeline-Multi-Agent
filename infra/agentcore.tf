@@ -74,7 +74,7 @@ resource "aws_bedrockagentcore_memory" "pipeline" {
 # ── MCP Gateway ───────────────────────────────────────────────
 
 resource "aws_bedrockagentcore_gateway" "mcp" {
-  name        = replace("${var.project_name}_${var.environment}_mcp_gateway", "-", "_")
+  name        = "${var.project_name}-${var.environment}-mcp-gateway"
   description = "MCP gateway for Terraform Registry and AWS Docs"
 
   protocol_type   = "MCP"
@@ -85,7 +85,7 @@ resource "aws_bedrockagentcore_gateway" "mcp" {
 # Gateway target: Terraform Registry MCP server
 resource "aws_bedrockagentcore_gateway_target" "terraform_registry" {
   gateway_identifier = aws_bedrockagentcore_gateway.mcp.gateway_id
-  name               = "terraform_registry"
+  name               = "terraform-registry"
   description        = "Terraform Registry MCP — module schemas, provider templates"
 
   target_configuration {
@@ -100,7 +100,7 @@ resource "aws_bedrockagentcore_gateway_target" "terraform_registry" {
 # Gateway target: AWS Documentation MCP server
 resource "aws_bedrockagentcore_gateway_target" "aws_docs" {
   gateway_identifier = aws_bedrockagentcore_gateway.mcp.gateway_id
-  name               = "aws_docs"
+  name               = "aws-docs"
   description        = "AWS Docs MCP — live AWS resource property documentation"
 
   target_configuration {
