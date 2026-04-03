@@ -35,10 +35,6 @@ output "memory_id" {
 
 # ── Gateway ───────────────────────────────────────────────────
 
-output "gateway_id" {
-  description = "MCP gateway identifier"
-  value       = aws_bedrockagentcore_gateway.mcp.gateway_id
-}
 
 # ── Tools ─────────────────────────────────────────────────────
 

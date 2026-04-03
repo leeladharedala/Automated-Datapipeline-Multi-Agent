@@ -5,11 +5,25 @@
 # Firecracker microVMs. No Lambda/ECS needed.
 # ──────────────────────────────────────────────────────────────
 
+# ── Wait for IAM Propagation ────────────────────────────────────
+resource "time_sleep" "wait_for_iam" {
+  depends_on = [
+    aws_iam_role.agentcore_execution,
+    aws_iam_role_policy.bedrock_invoke,
+    aws_iam_role_policy.agentcore_memory,
+    aws_iam_role_policy.ecr_pull,
+    aws_iam_role_policy.s3_access,
+    aws_iam_role_policy.secrets_read
+  ]
+  create_duration = "15s"
+}
+
 # ── Code Interpreter ──────────────────────────────────────────
 # Used by the Data Engineering subagent for running pytest
 # against generated transformation code.
 
 resource "aws_bedrockagentcore_code_interpreter" "data_eng" {
+  depends_on = [time_sleep.wait_for_iam]
   name        = replace("${var.project_name}_${var.environment}_code_interpreter", "-", "_")
   description = "Managed Python sandbox for Data Engineering subagent — runs pytest on generated code"
 
@@ -25,6 +39,7 @@ resource "aws_bedrockagentcore_code_interpreter" "data_eng" {
 # documentation lookups.
 
 resource "aws_bedrockagentcore_browser" "data_eng" {
+  depends_on = [time_sleep.wait_for_iam]
   name        = replace("${var.project_name}_${var.environment}_browser", "-", "_")
   description = "Managed Chromium browser for Data Engineering subagent — web search and docs"
 
