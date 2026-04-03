@@ -25,7 +25,7 @@ RUN wget -q https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionl
 
 # Python deps (uv is already in the base image, provides uvx for AWS Docs MCP server)
 COPY requirements.txt ./
-RUN uv pip install --system --no-cache -r requirements.txt uvicorn fastapi
+RUN uv pip install --prerelease=allow --system --no-cache -r requirements.txt uvicorn fastapi
 
 COPY src/ ./src/
 
