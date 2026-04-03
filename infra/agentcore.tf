@@ -65,7 +65,7 @@ resource "aws_bedrockagentcore_agent_runtime_endpoint" "orchestrator" {
 # ── Agent Memory ──────────────────────────────────────────────
 
 resource "aws_bedrockagentcore_memory" "pipeline" {
-  name        = "${var.project_name}-${var.environment}-memory"
+  name        = replace("${var.project_name}_${var.environment}_memory", "-", "_")
   description = "Short-term checkpoints and long-term preferences for the pipeline agents"
 
   event_expiry_duration = var.memory_event_expiry_days

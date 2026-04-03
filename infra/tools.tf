@@ -10,7 +10,7 @@
 # against generated transformation code.
 
 resource "aws_bedrockagentcore_code_interpreter" "data_eng" {
-  name        = "${var.project_name}-${var.environment}-code-interpreter"
+  name        = replace("${var.project_name}_${var.environment}_code_interpreter", "-", "_")
   description = "Managed Python sandbox for Data Engineering subagent — runs pytest on generated code"
 
   execution_role_arn = aws_iam_role.agentcore_execution.arn
