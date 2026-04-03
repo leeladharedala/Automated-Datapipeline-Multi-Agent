@@ -17,7 +17,7 @@ data "aws_iam_policy_document" "agentcore_assume_role" {
     actions = ["sts:AssumeRole"]
 
     principals {
-      type        = "Service"
+      type = "Service"
       identifiers = [
         "bedrock.amazonaws.com",
         "lambda.amazonaws.com",
