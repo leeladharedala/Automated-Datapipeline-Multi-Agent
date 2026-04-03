@@ -18,7 +18,11 @@ data "aws_iam_policy_document" "agentcore_assume_role" {
 
     principals {
       type        = "Service"
-      identifiers = ["bedrock.amazonaws.com"]
+      identifiers = [
+        "bedrock.amazonaws.com",
+        "lambda.amazonaws.com",
+        "ecs-tasks.amazonaws.com"
+      ]
     }
 
   }

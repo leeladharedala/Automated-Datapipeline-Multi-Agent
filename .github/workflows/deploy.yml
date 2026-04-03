@@ -160,10 +160,14 @@ jobs:
         
       - name: Repair Corrupted Gateway State
         run: |
-          echo "Removing un-destroyable gateway targets from terraform state so it stops blocking apply..."
-          terraform state rm aws_bedrockagentcore_gateway_target.terraform_registry || true
-          terraform state rm aws_bedrockagentcore_gateway_target.aws_docs || true
-          terraform state rm aws_bedrockagentcore_gateway.mcp || true
+          echo "Current terraform state:"
+          terraform state list
+          echo "Attempting to remove gateway objects:"
+          terraform state rm 'aws_bedrockagentcore_gateway_target.terraform_registry' || echo "Failed reg"
+          terraform state rm 'aws_bedrockagentcore_gateway_target.aws_docs' || echo "Failed docs"
+          terraform state rm 'aws_bedrockagentcore_gateway.mcp' || echo "Failed mcp"
+          echo "State after cleanup:"
+          terraform state list
 
 
       - name: Terraform Plan

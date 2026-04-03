@@ -15,7 +15,7 @@ resource "time_sleep" "wait_for_iam" {
     aws_iam_role_policy.s3_access,
     aws_iam_role_policy.secrets_read
   ]
-  create_duration = "30s"
+  create_duration = "90s"
 }
 
 # ── Code Interpreter ──────────────────────────────────────────
