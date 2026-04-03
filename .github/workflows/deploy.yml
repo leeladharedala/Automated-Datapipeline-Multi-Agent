@@ -12,7 +12,7 @@ name: Deploy AgentCore Pipeline
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - "src/**"
       - "Dockerfile"
@@ -29,10 +29,6 @@ on:
         default: "dev"
         type: choice
         options: [dev, staging, prod]
-      image_tag:
-        description: "Docker image tag (default: git SHA)"
-        required: false
-        type: string
 
 concurrency:
   group: deploy-${{ inputs.environment || 'dev' }}
@@ -78,7 +74,7 @@ jobs:
         id: meta
         run: |
           ECR_REPO="${{ steps.ecr-login.outputs.registry }}/${{ env.PROJECT_NAME }}-${{ env.TF_ENVIRONMENT }}"
-          IMAGE_TAG="${{ inputs.image_tag || github.sha }}"
+          IMAGE_TAG="${{ github.sha }}"
           echo "ecr_repo=${ECR_REPO}" >> "$GITHUB_OUTPUT"
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
 
