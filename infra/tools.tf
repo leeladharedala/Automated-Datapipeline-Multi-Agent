@@ -23,7 +23,7 @@ resource "time_sleep" "wait_for_iam" {
 # against generated transformation code.
 
 resource "aws_bedrockagentcore_code_interpreter" "data_eng" {
-  depends_on = [time_sleep.wait_for_iam]
+  depends_on  = [time_sleep.wait_for_iam]
   name        = replace("${var.project_name}_${var.environment}_code_interpreter", "-", "_")
   description = "Managed Python sandbox for Data Engineering subagent — runs pytest on generated code"
 
@@ -39,7 +39,7 @@ resource "aws_bedrockagentcore_code_interpreter" "data_eng" {
 # documentation lookups.
 
 resource "aws_bedrockagentcore_browser" "data_eng" {
-  depends_on = [time_sleep.wait_for_iam]
+  depends_on  = [time_sleep.wait_for_iam]
   name        = replace("${var.project_name}_${var.environment}_browser", "-", "_")
   description = "Managed Chromium browser for Data Engineering subagent — web search and docs"
 
