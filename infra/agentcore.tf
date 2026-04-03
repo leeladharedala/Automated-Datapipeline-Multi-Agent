@@ -5,6 +5,7 @@
 # ── Agent Runtime ─────────────────────────────────────────────
 
 resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
+  depends_on         = [time_sleep.wait_for_iam]
   agent_runtime_name = replace("${var.project_name}_${var.environment}", "-", "_")
   description        = "Multi-agent data pipeline orchestrator (LangGraph + DeepAgents)"
 
@@ -65,6 +66,7 @@ resource "aws_bedrockagentcore_agent_runtime_endpoint" "orchestrator" {
 # ── Agent Memory ──────────────────────────────────────────────
 
 resource "aws_bedrockagentcore_memory" "pipeline" {
+  depends_on            = [time_sleep.wait_for_iam]
   name        = replace("${var.project_name}_${var.environment}_memory", "-", "_")
   description = "Short-term checkpoints and long-term preferences for the pipeline agents"
 

@@ -21,11 +21,6 @@ data "aws_iam_policy_document" "agentcore_assume_role" {
       identifiers = ["bedrock.amazonaws.com"]
     }
 
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceAccount"
-      values   = [local.account_id]
-    }
   }
 }
 

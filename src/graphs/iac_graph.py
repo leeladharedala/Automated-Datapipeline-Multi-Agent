@@ -73,13 +73,20 @@ _VALIDATE_PROMPT = """\
 You are a Terraform validation runner. You have access to the execute tool \
 which runs commands in the AgentCore Runtime sandbox (terraform is pre-installed).
 
-Run these two commands in sequence:
+Given the task description below, verify that the generated Terraform code fully \
+implements the requested architectural design and is logically/syntactically valid.
+
+Run these steps:
 1. execute("cd /infra && terraform init -backend=false")
 2. execute("cd /infra && terraform validate")
+3. execute("cd /infra && terraform plan -input=false") to verify the execution plan.
 
-After running both commands, report the results. Include the full output \
-of terraform validate (both stdout and stderr). State clearly whether \
-validation PASSED or FAILED.
+Analyze the terraform output and file contents. Does the generated code actually match \
+the requested architecture in the task? Are there any missing resources or logic errors?
+If anything is wrong, missing, or fails validation, explain the exact failures and state \
+clearly that validation FAILED.
+If everything works perfectly and perfectly matches the task description, state clearly \
+that validation PASSED.
 """
 
 _FIX_PROMPT = """\
@@ -168,12 +175,13 @@ def _generate(state: IaCState, model) -> dict[str, Any]:
 
 def _validate(state: IaCState, model) -> dict[str, Any]:
     """Agent node: create_deep_agent with execute to run terraform validate."""
+    task = state.get("task_description", "")
     with traced_span("agent:iac.validate", {
         "agent.graph": "iac",
         "agent.node": "validate",
         "agent.role": "validator",
     }):
-        response = _run_agent(_VALIDATE_PROMPT, "Run terraform validation now.", model)
+        response = _run_agent(_VALIDATE_PROMPT, f"## Task\n{task}\n\nRun terraform validation and plan now.", model)
 
     passed = "PASSED" in response.upper() or "success" in response.lower()
     return {

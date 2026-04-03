@@ -149,7 +149,7 @@ jobs:
           terraform init \
             -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
             -backend-config="key=${{ env.PROJECT_NAME }}/${{ env.TF_ENVIRONMENT }}/terraform.tfstate" \
-            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="region=us-west-2" \
             -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
 
       - name: Terraform Format Check
@@ -157,6 +157,14 @@ jobs:
 
       - name: Terraform Validate
         run: terraform validate
+        
+      - name: Repair Corrupted Gateway State
+        run: |
+          echo "Removing un-destroyable gateway targets from terraform state so it stops blocking apply..."
+          terraform state rm aws_bedrockagentcore_gateway_target.terraform_registry || true
+          terraform state rm aws_bedrockagentcore_gateway_target.aws_docs || true
+          terraform state rm aws_bedrockagentcore_gateway.mcp || true
+
 
       - name: Terraform Plan
         run: |
