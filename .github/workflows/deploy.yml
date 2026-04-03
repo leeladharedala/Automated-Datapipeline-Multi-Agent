@@ -1,0 +1,223 @@
+# ──────────────────────────────────────────────────────────────
+# Deploy Pipeline
+#
+# Triggers: push to main, manual dispatch
+# Steps:
+#   1. Build & push Docker image to ECR
+#   2. Sync Anthropic API key → Secrets Manager
+#   3. Terraform init (remote S3 state) → plan → apply
+# ──────────────────────────────────────────────────────────────
+
+name: Deploy AgentCore Pipeline
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Dockerfile"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "infra/**"
+      - ".github/workflows/deploy.yml"
+      - "raw_data/**"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "dev"
+        type: choice
+        options: [dev, staging, prod]
+      image_tag:
+        description: "Docker image tag (default: git SHA)"
+        required: false
+        type: string
+
+concurrency:
+  group: deploy-${{ inputs.environment || 'dev' }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-west-2' }}
+  TF_ENVIRONMENT: ${{ inputs.environment || 'dev' }}
+  PROJECT_NAME: multi-agent-pipeline
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  TF_LOCK_TABLE: ${{ vars.TF_LOCK_TABLE || 'multi-agent-pipeline-tfstate-locks' }}
+
+jobs:
+  # ────────────────────────────────────────────────────────────
+  # Job 1: Build & Push Container Image
+  # ────────────────────────────────────────────────────────────
+  build-and-push:
+    name: Build & Push to ECR
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      ecr_repo: ${{ steps.meta.outputs.ecr_repo }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2.0.1
+
+      - name: Set image metadata
+        id: meta
+        run: |
+          ECR_REPO="${{ steps.ecr-login.outputs.registry }}/${{ env.PROJECT_NAME }}-${{ env.TF_ENVIRONMENT }}"
+          IMAGE_TAG="${{ inputs.image_tag || github.sha }}"
+          echo "ecr_repo=${ECR_REPO}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198e19c3bc6c9f # v6.18.0
+        with:
+          context: .
+          push: true
+          platforms: linux/arm64
+          tags: |
+            ${{ steps.meta.outputs.ecr_repo }}:${{ steps.meta.outputs.image_tag }}
+            ${{ steps.meta.outputs.ecr_repo }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ────────────────────────────────────────────────────────────
+  # Job 2: Sync Secrets (parallel with build)
+  # ────────────────────────────────────────────────────────────
+  sync-secrets:
+    name: Sync Anthropic API Key
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Push Anthropic API key to Secrets Manager
+        run: |
+          SECRET_ID="${{ env.PROJECT_NAME }}-${{ env.TF_ENVIRONMENT }}/anthropic-api-key"
+
+          if aws secretsmanager describe-secret --secret-id "$SECRET_ID" 2>/dev/null; then
+            echo "Updating existing secret..."
+            aws secretsmanager put-secret-value \
+              --secret-id "$SECRET_ID" \
+              --secret-string "${{ secrets.ANTHROPIC_API_KEY }}"
+            echo "✅ Anthropic API key synced to Secrets Manager"
+          else
+            echo "⚠️ Secret not found — will be created by Terraform on first run."
+          fi
+
+  # ────────────────────────────────────────────────────────────
+  # Job 3: Terraform Apply (with remote state)
+  # ────────────────────────────────────────────────────────────
+  terraform-deploy:
+    name: Terraform Deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [build-and-push, sync-secrets]
+
+    defaults:
+      run:
+        working-directory: infra
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "~> 1.9"
+
+      - name: Terraform Init (remote S3 state)
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ env.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ env.PROJECT_NAME }}/${{ env.TF_ENVIRONMENT }}/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ env.TF_LOCK_TABLE }}"
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: |
+          terraform plan \
+            -var="environment=${{ env.TF_ENVIRONMENT }}" \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -var="ecr_image_tag=${{ needs.build-and-push.outputs.image_tag }}" \
+            -out=tfplan \
+            -no-color \
+            -input=false
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
+        with:
+          name: tfplan-${{ env.TF_ENVIRONMENT }}-${{ github.sha }}
+          path: infra/tfplan
+          retention-days: 30
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve -input=false tfplan
+
+      - name: Sync raw data to S3
+        working-directory: .
+        run: |
+          if [ -d "raw_data" ]; then
+            BUCKET_NAME=$(cd infra && terraform output -raw raw_data_bucket_name)
+            aws s3 sync raw_data/ "s3://${BUCKET_NAME}/" --delete
+            echo "✅ raw_data/ synced to s3://${BUCKET_NAME}/"
+          else
+            echo "ℹ️ raw_data/ directory not found — skipping sync"
+          fi
+
+      - name: Output deployment info
+        run: |
+          echo "## 🚀 Deployment Complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Resource | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Environment | \`${{ env.TF_ENVIRONMENT }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image Tag | \`${{ needs.build-and-push.outputs.image_tag }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Runtime ID | \`$(terraform output -raw agent_runtime_id)\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Runtime ARN | \`$(terraform output -raw agent_runtime_arn)\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Runtime Endpoint | \`$(terraform output -raw agent_runtime_endpoint)\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Memory ID | \`$(terraform output -raw memory_id)\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| State Bucket | \`${{ env.TF_STATE_BUCKET }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Dashboard | $(terraform output -raw cloudwatch_dashboard_url) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Frontend Setup" >> "$GITHUB_STEP_SUMMARY"
+          echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+          echo "cd frontend" >> "$GITHUB_STEP_SUMMARY"
+          echo "echo 'AGENTCORE_RUNTIME_ENDPOINT=$(terraform output -raw agent_runtime_endpoint)' > .env.local" >> "$GITHUB_STEP_SUMMARY"
+          echo "npm run dev" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

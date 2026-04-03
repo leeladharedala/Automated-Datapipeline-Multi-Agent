@@ -1,0 +1,12 @@
+# ──────────────────────────────────────────────────────────────
+# Local backend config — copy and edit for your environment
+#
+# Usage:
+#   cd infra
+#   terraform init -backend-config=backend.hcl
+# ──────────────────────────────────────────────────────────────
+
+bucket         = "multi-agent-pipeline-tfstate-ACCOUNT_ID"
+key            = "multi-agent-pipeline/terraform.tfstate"
+region         = "us-west-2"
+dynamodb_table = "multi-agent-pipeline-tfstate-locks"
