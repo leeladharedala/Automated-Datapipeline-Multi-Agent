@@ -24,11 +24,10 @@ RUN wget -q https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionl
     rm actionlint_1.7.7_linux_arm64.tar.gz
 
 # Python deps (uv is already in the base image, provides uvx for AWS Docs MCP server)
-COPY pyproject.toml ./
-RUN uv sync --no-install-project --no-cache
+COPY requirements.txt ./
+RUN uv pip install --system --no-cache -r requirements.txt uvicorn fastapi
 
 COPY src/ ./src/
-RUN uv sync --no-cache
 
 EXPOSE 8080
-CMD ["uv", "run", "uvicorn", "src.agentcore.server:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["python", "-m", "uvicorn", "src.agentcore.server:app", "--host", "0.0.0.0", "--port", "8080"]
