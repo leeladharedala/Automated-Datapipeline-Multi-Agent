@@ -17,7 +17,7 @@ on:
       - "src/**"
       - "Dockerfile"
       - "pyproject.toml"
-      - "uv.lock"
+      - "requirements.txt"
       - "infra/**"
       - ".github/workflows/deploy.yml"
       - "raw_data/**"
@@ -69,6 +69,12 @@ jobs:
       - name: Login to Amazon ECR
         id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Ensure ECR repository exists
+        run: |
+          REPO_NAME="${{ env.PROJECT_NAME }}-${{ env.TF_ENVIRONMENT }}"
+          aws ecr describe-repositories --repository-names "$REPO_NAME" || \
+          aws ecr create-repository --repository-name "$REPO_NAME" --image-scanning-configuration scanOnPush=true
 
       - name: Set image metadata
         id: meta
