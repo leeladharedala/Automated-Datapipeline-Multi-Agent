@@ -6,7 +6,7 @@
 
 output "ecr_repository_url" {
   description = "ECR repository URL — use in CI/CD for docker push"
-  value       = aws_ecr_repository.agent.repository_url
+  value       = data.aws_ecr_repository.agent.repository_url
 }
 
 # ── AgentCore Runtime ─────────────────────────────────────────

@@ -74,7 +74,7 @@ data "aws_iam_policy_document" "ecr_pull" {
       "ecr:BatchGetImage",
       "ecr:BatchCheckLayerAvailability",
     ]
-    resources = [aws_ecr_repository.agent.arn]
+    resources = [data.aws_ecr_repository.agent.arn]
   }
 }
 

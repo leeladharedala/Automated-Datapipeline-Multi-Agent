@@ -2,23 +2,13 @@
 # ECR Repository — agent runtime container image
 # ──────────────────────────────────────────────────────────────
 
-resource "aws_ecr_repository" "agent" {
-  name                 = "${var.project_name}-${var.environment}"
-  image_tag_mutability = "MUTABLE"
-  force_delete         = var.environment != "prod"
-
-  image_scanning_configuration {
-    scan_on_push = true
-  }
-
-  encryption_configuration {
-    encryption_type = "AES256"
-  }
+data "aws_ecr_repository" "agent" {
+  name = "${var.project_name}-${var.environment}"
 }
 
 # Lifecycle policy — keep only the last 10 images
 resource "aws_ecr_lifecycle_policy" "agent" {
-  repository = aws_ecr_repository.agent.name
+  repository = data.aws_ecr_repository.agent.name
 
   policy = jsonencode({
     rules = [
