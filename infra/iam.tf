@@ -18,7 +18,7 @@ data "aws_iam_policy_document" "agentcore_assume_role" {
 
     principals {
       type        = "Service"
-      identifiers = ["agentcore.amazonaws.com"]
+      identifiers = ["bedrock.amazonaws.com"]
     }
 
     condition {
