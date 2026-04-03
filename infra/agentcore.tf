@@ -10,7 +10,7 @@ resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
 
   agent_runtime_artifact {
     container_configuration {
-      container_uri = "${aws_ecr_repository.agent.repository_url}:${var.ecr_image_tag}"
+      container_uri = "${data.aws_ecr_repository.agent.repository_url}:${var.ecr_image_tag}"
     }
   }
 
