@@ -5,7 +5,7 @@
 # ── Agent Runtime ─────────────────────────────────────────────
 
 resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
-  agent_runtime_name = "${var.project_name}-${var.environment}"
+  agent_runtime_name = replace("${var.project_name}_${var.environment}", "-", "_")
   description        = "Multi-agent data pipeline orchestrator (LangGraph + DeepAgents)"
 
   agent_runtime_artifact {
@@ -57,7 +57,7 @@ resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
 # ── Agent Runtime Endpoint ────────────────────────────────────
 
 resource "aws_bedrockagentcore_agent_runtime_endpoint" "orchestrator" {
-  name             = "${var.project_name}-${var.environment}-endpoint"
+  name             = replace("${var.project_name}_${var.environment}_endpoint", "-", "_")
   agent_runtime_id = aws_bedrockagentcore_agent_runtime.orchestrator.agent_runtime_id
   description      = "Public endpoint for the orchestrator agent runtime"
 }
@@ -74,7 +74,7 @@ resource "aws_bedrockagentcore_memory" "pipeline" {
 # ── MCP Gateway ───────────────────────────────────────────────
 
 resource "aws_bedrockagentcore_gateway" "mcp" {
-  name        = "${var.project_name}-${var.environment}-mcp-gateway"
+  name        = replace("${var.project_name}_${var.environment}_mcp_gateway", "-", "_")
   description = "MCP gateway for Terraform Registry and AWS Docs"
 
   protocol_type   = "MCP"
@@ -85,7 +85,7 @@ resource "aws_bedrockagentcore_gateway" "mcp" {
 # Gateway target: Terraform Registry MCP server
 resource "aws_bedrockagentcore_gateway_target" "terraform_registry" {
   gateway_identifier = aws_bedrockagentcore_gateway.mcp.gateway_id
-  name               = "terraform-registry"
+  name               = "terraform_registry"
   description        = "Terraform Registry MCP — module schemas, provider templates"
 
   target_configuration {
@@ -100,7 +100,7 @@ resource "aws_bedrockagentcore_gateway_target" "terraform_registry" {
 # Gateway target: AWS Documentation MCP server
 resource "aws_bedrockagentcore_gateway_target" "aws_docs" {
   gateway_identifier = aws_bedrockagentcore_gateway.mcp.gateway_id
-  name               = "aws-docs"
+  name               = "aws_docs"
   description        = "AWS Docs MCP — live AWS resource property documentation"
 
   target_configuration {

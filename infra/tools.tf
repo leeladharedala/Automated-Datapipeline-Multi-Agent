@@ -25,7 +25,7 @@ resource "aws_bedrockagentcore_code_interpreter" "data_eng" {
 # documentation lookups.
 
 resource "aws_bedrockagentcore_browser" "data_eng" {
-  name        = "${var.project_name}-${var.environment}-browser"
+  name        = replace("${var.project_name}_${var.environment}_browser", "-", "_")
   description = "Managed Chromium browser for Data Engineering subagent — web search and docs"
 
   network_configuration {
