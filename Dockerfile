@@ -24,8 +24,8 @@ RUN wget -q https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionl
     rm actionlint_1.7.7_linux_arm64.tar.gz
 
 # Python deps (uv is already in the base image, provides uvx for AWS Docs MCP server)
-COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-cache
+COPY pyproject.toml ./
+RUN uv sync --no-cache
 
 COPY src/ ./src/
 
