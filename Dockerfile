@@ -32,6 +32,8 @@ COPY src/ ./src/
 
 EXPOSE 8080
 ENV PORT=8080
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
 
 # Health check required by AWS AgentCore ECS (120s start-period to allow npx MCP downloads)
 HEALTHCHECK --interval=15s --timeout=10s --start-period=120s --retries=5 \
