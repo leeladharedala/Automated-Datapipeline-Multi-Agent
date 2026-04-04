@@ -23,10 +23,19 @@ RUN wget -q https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionl
     tar -xzf actionlint_1.7.7_linux_arm64.tar.gz -C /usr/local/bin/ actionlint && \
     rm actionlint_1.7.7_linux_arm64.tar.gz
 
-# Python deps (install uv first to bypass pip backtracking hell, then use uv to resolve deps instantly)
+# Python deps — use pip directly (uv can silently fail under QEMU ARM64 emulation)
 COPY requirements.txt ./
-RUN pip install --no-cache-dir --upgrade pip uv && \
-    uv pip install --system --no-cache -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Verify critical packages are actually installed
+RUN python -c "import deepagents; print(f'deepagents {deepagents.__version__}')" && \
+    python -c "import copilotkit; print('copilotkit OK')" && \
+    python -c "import langchain; print('langchain OK')" && \
+    python -c "import langgraph; print('langgraph OK')" && \
+    python -c "import fastapi; print('fastapi OK')" && \
+    python -c "import bedrock_agentcore; print('bedrock-agentcore OK')" && \
+    echo "All critical packages verified."
 
 COPY src/ ./src/
 
