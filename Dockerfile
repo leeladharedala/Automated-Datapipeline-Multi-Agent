@@ -32,8 +32,8 @@ COPY src/ ./src/
 EXPOSE 8080
 ENV PORT=8080
 
-# Health check required by AWS AgentCore ECS
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-  CMD curl -f http://localhost:8080/ping || exit 1
+# Health check required by AWS AgentCore ECS (120s start-period to allow npx MCP downloads)
+HEALTHCHECK --interval=15s --timeout=10s --start-period=120s --retries=5 \
+  CMD curl -f http://127.0.0.1:8080/ping || exit 1
 
 CMD ["python", "-m", "uvicorn", "src.agentcore.server:app", "--host", "0.0.0.0", "--port", "8080"]
