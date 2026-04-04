@@ -18,7 +18,7 @@ resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
   }
 
   protocol_configuration {
-    server_protocol = "AGUI"
+    server_protocol = "http"
   }
 
   role_arn = aws_iam_role.agentcore_execution.arn
