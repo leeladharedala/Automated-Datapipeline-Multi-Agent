@@ -1,23 +1,23 @@
-# Core agent framework (pinned from successful build 2026-04-04)
+# Core agent framework
 deepagents==0.4.8
-langgraph==1.1.5,<1.2.0
+langgraph==1.1.5
 langchain>=1.2.10,<2.0
-langchain-core==1.2.18,<2.0
+langchain-core>=1.2.19,<2.0
 langchain-anthropic==1.4.0
 langchain-openai==1.1.12
 
-# MCP integration (connects to Terraform MCP + AWS Docs MCP over stdio)
+# MCP integration
 langchain-mcp-adapters==0.2.2
 
 # CopilotKit AG-UI integration
 copilotkit==0.1.84
 
-# AgentCore Memory (checkpointer + store for LangGraph)
+# AgentCore Memory
 langgraph-checkpoint-aws==0.1.0
 
 bedrock-agentcore>=1.0.0
 
-# AWS SDK (secret resolution at boot)
+# AWS SDK
 boto3==1.42.83
 
 # GitHub PR submission
@@ -34,6 +34,6 @@ opentelemetry-exporter-otlp-proto-http==1.40.0
 opentelemetry-propagator-aws-xray==1.0.2
 opentelemetry-sdk-extension-aws==2.1.0
 
-# Testing (install with: pip install -e ".[test]")
+# Testing
 pytest==8.4.2
 hypothesis==6.151.10
