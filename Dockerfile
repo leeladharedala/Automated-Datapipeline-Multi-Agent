@@ -26,7 +26,7 @@ RUN wget -q https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionl
 # Python deps (install uv first to bypass pip backtracking hell, then use uv to resolve deps instantly)
 COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip uv && \
-    uv pip install --system --no-cache -r requirements.txt uvicorn fastapi
+    uv pip install --system --no-cache -r requirements.txt
 
 COPY src/ ./src/
 
@@ -35,6 +35,8 @@ ENV PORT=8080
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
+# NOTE: Do NOT add a Docker HEALTHCHECK — AgentCore manages health
+# checking itself by polling /ping. A Docker-level HEALTHCHECK can
+# conflict with AgentCore's container lifecycle management.
 
-# CMD ["python", "-m", "uvicorn", "src.agentcore.server:app", "--host", "0.0.0.0", "--port", "8080"]
-CMD ["python", "src/agentcore/server_minimal.py"]
+CMD ["python", "-m", "uvicorn", "src.agentcore.server:app", "--host", "0.0.0.0", "--port", "8080"]

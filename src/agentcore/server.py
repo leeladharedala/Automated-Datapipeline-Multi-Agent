@@ -1,11 +1,14 @@
 """
-AgentCore Entrypoint — FastAPI AG-UI protocol server.
+AgentCore Entrypoint — AG-UI protocol server for CopilotKit frontend.
 
-Exposes POST /invocations and GET /ping for the AgentCore Runtime.
-Wraps the DeepAgent orchestrator graph with LangGraphAGUIAgent
-(AG-UI event encoding) and CopilotKitMiddleware (frontend state sync).
+Uses FastAPI + uvicorn on port 8080 with /invocations (POST) and /ping (GET)
+as required by AgentCore's AGUI protocol support. The CopilotKitMiddleware
+handles AG-UI event encoding and SSE streaming.
 """
 
+print("BOOT: AgentCore server module loading...", flush=True)
+
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -13,17 +16,23 @@ from contextlib import asynccontextmanager
 import boto3
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+
+print("BOOT: Core imports OK.", flush=True)
+
 from copilotkit import CopilotKitMiddleware
 from copilotkit.langgraph import LangGraphAGUIAgent
+
+print("BOOT: CopilotKit imports OK.", flush=True)
 
 from src.main import build_agent
 from src.tracing import setup_tracing, shutdown_tracing
 from src.tracing.agui import wrap_agui_handler
 from src.tracing.server import create_invocations_tracing_middleware
 
+print("BOOT: All imports successful.", flush=True)
+
 logger = logging.getLogger(__name__)
 
-# Module-level state for the initialized agent graph
 _agent_graph = None
 _copilotkit_middleware = None
 
@@ -37,35 +46,31 @@ def _resolve_secrets():
             client = boto3.client("secretsmanager", region_name=region)
             resp = client.get_secret_value(SecretId=arn)
             os.environ["ANTHROPIC_API_KEY"] = resp["SecretString"]
-            logger.info("Resolved ANTHROPIC_API_KEY from Secrets Manager")
+            print("BOOT: Resolved ANTHROPIC_API_KEY from Secrets Manager", flush=True)
         except Exception as exc:
-            logger.error("Failed to resolve Anthropic API key from %s: %s", arn, exc)
+            print(f"ERROR: Failed to resolve Anthropic API key: {exc}", flush=True)
             raise
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize tracing and the orchestrator graph once at startup.
-
-    IMPORTANT: This must never crash or the container dies before the
-    healthcheck endpoint becomes reachable, causing AgentCore to kill
-    it with a 424 RuntimeClientError and zero CloudWatch logs.
-    """
+    """Initialize tracing, secrets, and the orchestrator graph at startup."""
     global _agent_graph, _copilotkit_middleware
 
     try:
         setup_tracing()
+        print("BOOT: Tracing initialized.", flush=True)
     except Exception as exc:
         print(f"WARNING: Tracing setup failed: {exc}", flush=True)
 
     try:
         _resolve_secrets()
     except Exception as exc:
-        print(f"ERROR: Secret resolution failed: {exc}", flush=True)
+        print(f"ERROR: Secret resolution failed — continuing without API key: {exc}", flush=True)
 
     try:
-        logger.info("Building orchestrator agent graph...")
-        _agent_graph = await build_agent()
+        print("BOOT: Building orchestrator agent graph...", flush=True)
+        _agent_graph = await asyncio.wait_for(build_agent(), timeout=120.0)
 
         agent = LangGraphAGUIAgent(
             graph=_agent_graph,
@@ -78,10 +83,10 @@ async def lifespan(app: FastAPI):
             _copilotkit_middleware.handle_request
         )
 
-        logger.info("Agent graph initialized and ready.")
+        print("BOOT: Agent graph initialized and ready.", flush=True)
+    except asyncio.TimeoutError:
+        print("ERROR: Agent build timed out after 120s (MCP tools may be hanging).", flush=True)
     except Exception as exc:
-        # Log but do NOT re-raise — let the server boot so /ping is reachable
-        # and AgentCore doesn't kill us before we can emit any logs.
         print(f"ERROR: Agent build failed: {exc}", flush=True)
         logger.error("Agent graph initialization failed: %s", exc, exc_info=True)
 
@@ -101,66 +106,24 @@ app.add_middleware(create_invocations_tracing_middleware())
 
 @app.get("/ping")
 async def ping():
-    """Health check endpoint required by AgentCore Runtime."""
-    if _agent_graph is None:
-        return JSONResponse(
-            status_code=503,
-            content={"status": "Unavailable", "detail": "Agent graph not yet initialized"},
-        )
-    return {"status": "Healthy"}
+    """Health check — always return 200 so AgentCore keeps the container alive."""
+    return {"status": "Healthy", "agent_ready": _agent_graph is not None}
 
 
 @app.post("/invocations")
 async def invocations(request: Request):
-    """AG-UI protocol handler — receives RunAgentInput, streams AG-UI events."""
+    """AG-UI protocol handler — delegates to CopilotKitMiddleware for SSE streaming."""
     if _copilotkit_middleware is None:
         return JSONResponse(
             status_code=503,
             content={"error": "Agent graph not yet initialized"},
         )
 
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Invalid JSON payload"},
-        )
-
-    # Validate required fields per AG-UI RunAgentInput schema
-    if not isinstance(body, dict):
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Payload must be a JSON object"},
-        )
-
-    missing = []
-    for field in ("thread_id", "run_id", "messages"):
-        if field not in body:
-            missing.append(field)
-    if missing:
-        return JSONResponse(
-            status_code=400,
-            content={"error": f"Missing required fields: {', '.join(missing)}"},
-        )
-
-    if not isinstance(body.get("messages"), list):
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Field 'messages' must be a list"},
-        )
-
-    if not isinstance(body.get("thread_id"), str) or not body["thread_id"]:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Field 'thread_id' must be a non-empty string"},
-        )
-
-    if not isinstance(body.get("run_id"), str) or not body["run_id"]:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Field 'run_id' must be a non-empty string"},
-        )
-
-    # Delegate to CopilotKitMiddleware which handles AG-UI streaming
+    # Delegate to CopilotKitMiddleware which handles AG-UI event encoding
+    # and SSE streaming back to the frontend.
     return await _copilotkit_middleware.handle_request(request)
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8080)
