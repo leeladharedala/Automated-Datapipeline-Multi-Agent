@@ -19,9 +19,7 @@ data "aws_iam_policy_document" "agentcore_assume_role" {
     principals {
       type = "Service"
       identifiers = [
-        "bedrock.amazonaws.com",
-        "lambda.amazonaws.com",
-        "ecs-tasks.amazonaws.com"
+        "bedrock-agentcore.amazonaws.com"
       ]
     }
 
@@ -31,26 +29,6 @@ data "aws_iam_policy_document" "agentcore_assume_role" {
 resource "aws_iam_role" "agentcore_execution" {
   name               = "${var.project_name}-${var.environment}-agentcore-exec"
   assume_role_policy = data.aws_iam_policy_document.agentcore_assume_role.json
-}
-
-# ── Bedrock model invocation ──────────────────────────────────
-
-data "aws_iam_policy_document" "bedrock_invoke" {
-  statement {
-    sid    = "BedrockInvoke"
-    effect = "Allow"
-    actions = [
-      "bedrock:InvokeModel",
-      "bedrock:InvokeModelWithResponseStream",
-    ]
-    resources = ["arn:aws:bedrock:${local.region}::foundation-model/*"]
-  }
-}
-
-resource "aws_iam_role_policy" "bedrock_invoke" {
-  name   = "bedrock-invoke"
-  role   = aws_iam_role.agentcore_execution.id
-  policy = data.aws_iam_policy_document.bedrock_invoke.json
 }
 
 # ── ECR pull ──────────────────────────────────────────────────
