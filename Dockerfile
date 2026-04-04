@@ -1,5 +1,5 @@
-# AgentCore Runtime container — ARM64 required
-FROM --platform=linux/arm64 public.ecr.aws/docker/library/python:3.12-slim
+# AgentCore Runtime container
+FROM public.ecr.aws/docker/library/python:3.12-slim
 
 WORKDIR /app
 

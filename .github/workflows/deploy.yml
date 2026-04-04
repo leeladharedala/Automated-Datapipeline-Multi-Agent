@@ -98,6 +98,7 @@ jobs:
             ${{ steps.meta.outputs.ecr_repo }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: false
 
   # ────────────────────────────────────────────────────────────
   # Job 2: Sync Secrets (parallel with build)
