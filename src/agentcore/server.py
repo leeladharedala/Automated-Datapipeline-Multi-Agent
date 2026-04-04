@@ -45,34 +45,54 @@ def _resolve_secrets():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize tracing and the orchestrator graph once at startup."""
+    """Initialize tracing and the orchestrator graph once at startup.
+
+    IMPORTANT: This must never crash or the container dies before the
+    healthcheck endpoint becomes reachable, causing AgentCore to kill
+    it with a 424 RuntimeClientError and zero CloudWatch logs.
+    """
     global _agent_graph, _copilotkit_middleware
 
-    setup_tracing()
+    try:
+        setup_tracing()
+    except Exception as exc:
+        print(f"WARNING: Tracing setup failed: {exc}", flush=True)
 
-    _resolve_secrets()
+    try:
+        _resolve_secrets()
+    except Exception as exc:
+        print(f"ERROR: Secret resolution failed: {exc}", flush=True)
 
-    logger.info("Building orchestrator agent graph...")
-    _agent_graph = await build_agent()
+    try:
+        logger.info("Building orchestrator agent graph...")
+        _agent_graph = await build_agent()
 
-    agent = LangGraphAGUIAgent(
-        graph=_agent_graph,
-        name="orchestrator",
-    )
-    _copilotkit_middleware = CopilotKitMiddleware(agents=[agent])
+        agent = LangGraphAGUIAgent(
+            graph=_agent_graph,
+            name="orchestrator",
+        )
+        _copilotkit_middleware = CopilotKitMiddleware(agents=[agent])
 
-    # Wrap handle_request with AG-UI stream tracing
-    _copilotkit_middleware.handle_request = wrap_agui_handler(
-        _copilotkit_middleware.handle_request
-    )
+        # Wrap handle_request with AG-UI stream tracing
+        _copilotkit_middleware.handle_request = wrap_agui_handler(
+            _copilotkit_middleware.handle_request
+        )
 
-    logger.info("Agent graph initialized and ready.")
+        logger.info("Agent graph initialized and ready.")
+    except Exception as exc:
+        # Log but do NOT re-raise — let the server boot so /ping is reachable
+        # and AgentCore doesn't kill us before we can emit any logs.
+        print(f"ERROR: Agent build failed: {exc}", flush=True)
+        logger.error("Agent graph initialization failed: %s", exc, exc_info=True)
 
     yield
 
     _agent_graph = None
     _copilotkit_middleware = None
-    shutdown_tracing()
+    try:
+        shutdown_tracing()
+    except Exception:
+        pass
 
 
 app = FastAPI(lifespan=lifespan)

@@ -23,10 +23,10 @@ RUN wget -q https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionl
     tar -xzf actionlint_1.7.7_linux_arm64.tar.gz -C /usr/local/bin/ actionlint && \
     rm actionlint_1.7.7_linux_arm64.tar.gz
 
-# Python deps (use standard pip for compatibility)
+# Python deps (install uv first to bypass pip backtracking hell, then use uv to resolve deps instantly)
 COPY requirements.txt ./
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt uvicorn fastapi uv
+RUN pip install --no-cache-dir --upgrade pip uv && \
+    uv pip install --system --no-cache -r requirements.txt uvicorn fastapi
 
 COPY src/ ./src/
 
