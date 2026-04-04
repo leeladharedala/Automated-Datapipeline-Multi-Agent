@@ -15,6 +15,8 @@ copilotkit==0.1.84
 # AgentCore Memory (checkpointer + store for LangGraph)
 langgraph-checkpoint-aws==0.1.0
 
+bedrock-agentcore>=1.0.0
+
 # AWS SDK (secret resolution at boot)
 boto3==1.42.83
 

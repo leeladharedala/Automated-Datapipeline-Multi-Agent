@@ -36,4 +36,5 @@ ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
 
-CMD ["python", "-m", "uvicorn", "src.agentcore.server:app", "--host", "0.0.0.0", "--port", "8080"]
+# CMD ["python", "-m", "uvicorn", "src.agentcore.server:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["python", "src/agentcore/server_minimal.py"]
