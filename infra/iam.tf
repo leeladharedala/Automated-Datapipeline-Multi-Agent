@@ -96,9 +96,7 @@ data "aws_iam_policy_document" "cloudwatch_logs" {
       "logs:PutLogEvents",
       "logs:DescribeLogStreams",
     ]
-    resources = [
-      "arn:aws:logs:${local.region}:${local.account_id}:log-group:/agentcore/${var.project_name}-${var.environment}*",
-    ]
+    resources = ["*"]
   }
 }
 

@@ -1,5 +1,5 @@
-# AgentCore Runtime container — ARM64 required
-FROM --platform=linux/arm64 ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+# AgentCore Runtime container — AMD64 (x86_64) required by default
+FROM --platform=linux/amd64 ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 WORKDIR /app
 
@@ -14,14 +14,14 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     rm -rf /var/lib/apt/lists/*
 
 # Terraform
-RUN wget -q https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_arm64.zip && \
-    unzip terraform_1.9.8_linux_arm64.zip -d /usr/local/bin/ && \
-    rm terraform_1.9.8_linux_arm64.zip
+RUN wget -q https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip && \
+    unzip terraform_1.9.8_linux_amd64.zip -d /usr/local/bin/ && \
+    rm terraform_1.9.8_linux_amd64.zip
 
 # Actionlint
-RUN wget -q https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_arm64.tar.gz && \
-    tar -xzf actionlint_1.7.7_linux_arm64.tar.gz -C /usr/local/bin/ actionlint && \
-    rm actionlint_1.7.7_linux_arm64.tar.gz
+RUN wget -q https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz && \
+    tar -xzf actionlint_1.7.7_linux_amd64.tar.gz -C /usr/local/bin/ actionlint && \
+    rm actionlint_1.7.7_linux_amd64.tar.gz
 
 # Python deps (uv is already in the base image, provides uvx for AWS Docs MCP server)
 COPY requirements.txt ./
