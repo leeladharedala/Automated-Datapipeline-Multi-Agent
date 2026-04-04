@@ -9,8 +9,6 @@ resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
   agent_runtime_name = replace("${var.project_name}_${var.environment}", "-", "_")
   description        = "Multi-agent data pipeline orchestrator (LangGraph + DeepAgents)"
 
-  agent_runtime_architecture = "ARM64"
-
   network_configuration {
     network_mode = "PUBLIC"
   }
