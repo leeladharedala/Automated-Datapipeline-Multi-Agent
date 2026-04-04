@@ -1,5 +1,5 @@
 # AgentCore Runtime container — ARM64 required
-FROM --platform=linux/arm64 ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+FROM --platform=linux/arm64 public.ecr.aws/docker/library/python:3.12-slim
 
 WORKDIR /app
 
@@ -23,9 +23,10 @@ RUN wget -q https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionl
     tar -xzf actionlint_1.7.7_linux_arm64.tar.gz -C /usr/local/bin/ actionlint && \
     rm actionlint_1.7.7_linux_arm64.tar.gz
 
-# Python deps (uv is already in the base image, provides uvx for AWS Docs MCP server)
+# Python deps (use standard pip for compatibility)
 COPY requirements.txt ./
-RUN uv pip install --prerelease=allow --system --no-cache -r requirements.txt uvicorn fastapi
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt uvicorn fastapi uv
 
 COPY src/ ./src/
 
