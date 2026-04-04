@@ -17,6 +17,10 @@ resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
     }
   }
 
+  protocol_configuration {
+    server_protocol = "HTTP"
+  }
+
   role_arn = aws_iam_role.agentcore_execution.arn
 
   environment_variables = {
