@@ -18,16 +18,10 @@ from src.graphs import (
     build_iac_graph,
     build_cicd_graph,
     build_data_eng_graph,
-    OrchestratorMiddleware,
 )
 from src.tools.gateway import load_gateway_tools
 from src.tools.submit_pr import submit_pr
 from src.document_parser import parse_document_tool
-from src.tracing import (
-    traced_llm,
-    trace_tools,
-    instrument_middleware,
-)
 
 REGION = os.environ.get("AWS_REGION", "us-west-2")
 MEMORY_ID = os.environ.get("AGENTCORE_MEMORY_ID", "")
@@ -44,7 +38,6 @@ async def build_agent():
         model="claude-sonnet-4-6-20250514",
         temperature=0,
     )
-    model = traced_llm(model)
 
     # Load MCP tools from Terraform Registry + AWS Docs servers
     try:
@@ -83,17 +76,15 @@ async def build_agent():
     # Long-term memory: preferences and facts
     store = AgentCoreMemoryStore(memory_id=MEMORY_ID, region_name=REGION)
 
-    # Instrument middleware with tracing
-    TracedOrchestratorMiddleware = instrument_middleware(OrchestratorMiddleware)
-
+    # Pass tools directly — skip tracing wrappers to avoid
+    # Pydantic v2 compatibility issues during agent compilation
     agent = create_deep_agent(
         model=model,
         system_prompt=ORCHESTRATOR_PROMPT,
         subagents=subagents,
-        tools=trace_tools([submit_pr, parse_document_tool]),
+        tools=[submit_pr, parse_document_tool],
         checkpointer=checkpointer,
         store=store,
-        middleware=[TracedOrchestratorMiddleware],
     )
 
     return agent
