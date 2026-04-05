@@ -14,7 +14,7 @@ langchain-mcp-adapters==0.2.2
 copilotkit==0.1.84
 
 # AgentCore Memory
-langgraph-checkpoint-aws==0.1.0
+langgraph-checkpoint-aws>=0.2.0
 
 bedrock-agentcore>=1.0.0
 
