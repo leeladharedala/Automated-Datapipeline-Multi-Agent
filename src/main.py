@@ -94,10 +94,10 @@ async def build_agent():
     ]
 
     # Short-term memory: checkpoints for state persistence + VFS
-    checkpointer = AgentCoreMemorySaver(MEMORY_ID, region_name=REGION)
+    checkpointer = AgentCoreMemorySaver(memory_id=MEMORY_ID, region_name=REGION)
 
     # Long-term memory: preferences and facts across sessions
-    store = AgentCoreMemoryStore(MEMORY_ID, region_name=REGION)
+    store = AgentCoreMemoryStore(memory_id=MEMORY_ID, region_name=REGION)
     store = traced_store_search(store)
     store = traced_store_put(store)
 
