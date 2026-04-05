@@ -30,11 +30,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Verify critical packages are actually installed and show versions
 RUN python -c "\
-from importlib.metadata import version; \
 import deepagents; print(f'deepagents {deepagents.__version__}'); \
 import copilotkit; print('copilotkit OK'); \
 import langchain; print(f'langchain {langchain.__version__}'); \
-import langgraph; print(f'langgraph {version(\"langgraph\")}'); \
+import langgraph; print(f'langgraph {langgraph.__version__}'); \
 import fastapi; print(f'fastapi {fastapi.__version__}'); \
 import bedrock_agentcore; print('bedrock-agentcore OK'); \
 print('All critical packages verified.'); \
@@ -51,4 +50,4 @@ ENV PYTHONUNBUFFERED=1
 # checking itself by polling /ping. A Docker-level HEALTHCHECK can
 # conflict with AgentCore's container lifecycle management.
 
-CMD ["python", "-m", "uvicorn", "src.agentcore.server:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["python", "src/agentcore/server.py"]

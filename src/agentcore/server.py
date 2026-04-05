@@ -1,8 +1,8 @@
 """
-AgentCore Entrypoint — AG-UI protocol server for CopilotKit frontend.
+AgentCore Entrypoint — BedrockAgentCoreApp with full orchestrator agent.
 
-FastAPI + uvicorn on port 8080 with /invocations (POST) and /ping (GET).
-CopilotKitMiddleware handles AG-UI event encoding and SSE streaming.
+Uses the official SDK (@app.entrypoint) which works on AgentCore.
+Agent initialization happens lazily on first invocation.
 """
 
 print("BOOT: Server module loading...", flush=True)
@@ -10,20 +10,12 @@ print("BOOT: Server module loading...", flush=True)
 import asyncio
 import logging
 import os
-from contextlib import asynccontextmanager
+import traceback
 
 import boto3
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from copilotkit import CopilotKitMiddleware
-from copilotkit.langgraph import LangGraphAGUIAgent
+from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
-from src.main import build_agent
-from src.tracing import setup_tracing, shutdown_tracing
-from src.tracing.agui import wrap_agui_handler
-from src.tracing.server import create_invocations_tracing_middleware
-
-print("BOOT: All imports successful.", flush=True)
+print("BOOT: Core imports OK.", flush=True)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -31,31 +23,30 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 
+app = BedrockAgentCoreApp()
+
 _agent_graph = None
-_copilotkit_middleware = None
+_initialized = False
 
 
 def _resolve_secrets():
-    """Resolve API keys from Secrets Manager ARNs into env vars at boot."""
     arn = os.environ.get("ANTHROPIC_API_KEY_SECRET_ARN", "")
     if arn and not os.environ.get("ANTHROPIC_API_KEY"):
         region = os.environ.get("AWS_REGION", "us-west-2")
         client = boto3.client("secretsmanager", region_name=region)
         resp = client.get_secret_value(SecretId=arn)
         os.environ["ANTHROPIC_API_KEY"] = resp["SecretString"]
-        print("BOOT: Resolved ANTHROPIC_API_KEY from Secrets Manager", flush=True)
+        print("BOOT: Resolved ANTHROPIC_API_KEY", flush=True)
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Initialize tracing, secrets, and the orchestrator graph at startup."""
-    global _agent_graph, _copilotkit_middleware
+def _init_sync():
+    """Synchronous wrapper for lazy initialization."""
+    global _agent_graph, _initialized
 
-    try:
-        setup_tracing()
-        print("BOOT: Tracing initialized.", flush=True)
-    except Exception as exc:
-        print(f"WARNING: Tracing setup failed: {exc}", flush=True)
+    if _initialized:
+        return
+
+    print("BOOT: Starting initialization...", flush=True)
 
     try:
         _resolve_secrets()
@@ -63,43 +54,72 @@ async def lifespan(app: FastAPI):
         print(f"ERROR: Secret resolution failed: {exc}", flush=True)
 
     try:
-        print("BOOT: Building orchestrator agent graph...", flush=True)
-        _agent_graph = await asyncio.wait_for(build_agent(), timeout=120.0)
+        from src.tracing import setup_tracing
+        setup_tracing()
+        print("BOOT: Tracing initialized.", flush=True)
+    except Exception as exc:
+        print(f"WARNING: Tracing setup failed: {exc}", flush=True)
 
-        agent = LangGraphAGUIAgent(graph=_agent_graph, name="orchestrator")
-        _copilotkit_middleware = CopilotKitMiddleware(agents=[agent])
-        _copilotkit_middleware.handle_request = wrap_agui_handler(
-            _copilotkit_middleware.handle_request
+    try:
+        from src.main import build_agent
+        print("BOOT: Building agent graph...", flush=True)
+        loop = asyncio.new_event_loop()
+        _agent_graph = loop.run_until_complete(
+            asyncio.wait_for(build_agent(), timeout=120.0)
         )
-        print("BOOT: Agent graph initialized and ready.", flush=True)
-    except asyncio.TimeoutError:
-        print("ERROR: Agent build timed out after 120s.", flush=True)
+        loop.close()
+        print("BOOT: Agent graph ready.", flush=True)
     except Exception as exc:
         print(f"ERROR: Agent build failed: {exc}", flush=True)
-        import traceback
         traceback.print_exc()
 
-    yield
+    _initialized = True
 
-    _agent_graph = None
-    _copilotkit_middleware = None
+
+@app.entrypoint
+def invoke(payload, context=None):
+    """Process user input through the orchestrator agent."""
+    _init_sync()
+
+    if _agent_graph is None:
+        return {"error": "Agent failed to initialize. Check logs."}
+
+    # Extract prompt from various payload formats
+    prompt = payload.get("prompt", "")
+    if not prompt:
+        prompt = payload.get("input", {}).get("prompt", "")
+    if not prompt:
+        messages = payload.get("messages", [])
+        if messages:
+            last = messages[-1]
+            prompt = last.get("content", "") if isinstance(last, dict) else str(last)
+
+    if not prompt:
+        return {"error": "No prompt found in payload."}
+
     try:
-        shutdown_tracing()
-    except Exception:
-        pass
+        loop = asyncio.new_event_loop()
+        result = loop.run_until_complete(
+            _agent_graph.ainvoke(
+                {"messages": [{"role": "user", "content": prompt}]},
+            )
+        )
+        loop.close()
+
+        messages = result.get("messages", [])
+        if messages:
+            last_msg = messages[-1]
+            content = getattr(last_msg, "content", str(last_msg))
+            return {"result": content}
+
+        return {"result": str(result)}
+
+    except Exception as exc:
+        print(f"ERROR: Invocation failed: {exc}", flush=True)
+        traceback.print_exc()
+        return {"error": f"Invocation failed: {exc}"}
 
 
-app = FastAPI(lifespan=lifespan)
-app.add_middleware(create_invocations_tracing_middleware())
-
-
-@app.get("/ping")
-async def ping():
-    return {"status": "Healthy", "agent_ready": _agent_graph is not None}
-
-
-@app.post("/invocations")
-async def invocations(request: Request):
-    if _copilotkit_middleware is None:
-        return JSONResponse(status_code=503, content={"error": "Agent not ready"})
-    return await _copilotkit_middleware.handle_request(request)
+if __name__ == "__main__":
+    print("BOOT: Starting BedrockAgentCoreApp...", flush=True)
+    app.run()
