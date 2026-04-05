@@ -27,6 +27,7 @@ app = BedrockAgentCoreApp()
 
 _agent_graph = None
 _initialized = False
+_init_error = None
 
 
 def _resolve_secrets():
@@ -41,24 +42,29 @@ def _resolve_secrets():
 
 def _init_sync():
     """Synchronous wrapper for lazy initialization."""
-    global _agent_graph, _initialized
+    global _agent_graph, _initialized, _init_error
 
     if _initialized:
         return
 
     print("BOOT: Starting initialization...", flush=True)
+    errors = []
 
     try:
         _resolve_secrets()
     except Exception as exc:
-        print(f"ERROR: Secret resolution failed: {exc}", flush=True)
+        msg = f"Secret resolution failed: {exc}"
+        print(f"ERROR: {msg}", flush=True)
+        errors.append(msg)
 
     try:
         from src.tracing import setup_tracing
         setup_tracing()
         print("BOOT: Tracing initialized.", flush=True)
     except Exception as exc:
-        print(f"WARNING: Tracing setup failed: {exc}", flush=True)
+        msg = f"Tracing setup failed: {exc}"
+        print(f"WARNING: {msg}", flush=True)
+        errors.append(msg)
 
     try:
         from src.main import build_agent
@@ -70,9 +76,12 @@ def _init_sync():
         loop.close()
         print("BOOT: Agent graph ready.", flush=True)
     except Exception as exc:
-        print(f"ERROR: Agent build failed: {exc}", flush=True)
+        msg = f"Agent build failed: {type(exc).__name__}: {exc}"
+        print(f"ERROR: {msg}", flush=True)
         traceback.print_exc()
+        errors.append(msg)
 
+    _init_error = "; ".join(errors) if errors else None
     _initialized = True
 
 
@@ -82,7 +91,7 @@ def invoke(payload, context=None):
     _init_sync()
 
     if _agent_graph is None:
-        return {"error": "Agent failed to initialize. Check logs."}
+        return {"error": f"Agent failed to initialize: {_init_error or 'unknown'}"}
 
     # Extract prompt from various payload formats
     prompt = payload.get("prompt", "")
