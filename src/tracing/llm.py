@@ -82,8 +82,9 @@ def traced_llm(model: BaseChatModel) -> BaseChatModel:
                 record_exception(span, exc)
                 raise
 
-    model.invoke = traced_invoke  # type: ignore[assignment]
-    model.ainvoke = traced_ainvoke  # type: ignore[assignment]
+    # Use object.__setattr__ to bypass Pydantic v2 field validation
+    object.__setattr__(model, "invoke", traced_invoke)
+    object.__setattr__(model, "ainvoke", traced_ainvoke)
     return model
 
 
