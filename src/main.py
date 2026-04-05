@@ -3,14 +3,13 @@ Multi-Agent Data Pipeline — Entry Point
 
 Creates the root orchestrator agent using DeepAgents, backed by
 AgentCore Memory for both short-term (checkpoint) and long-term
-(preferences/facts) persistence. Wires compiled LangGraph sub-agent
-graphs (IaC, CI/CD, DataEng) as CompiledSubAgents with
-OrchestratorMiddleware for pipeline-level state tracking.
+(preferences/facts) persistence.
 """
 
 import logging
 import os
-from deepagents import create_deep_agent
+
+from deepagents import create_deep_agent, CompiledSubAgent
 from langchain_anthropic import ChatAnthropic
 from langgraph_checkpoint_aws import AgentCoreMemorySaver, AgentCoreMemoryStore
 
@@ -24,18 +23,12 @@ from src.graphs import (
 from src.tools.gateway import load_gateway_tools
 from src.tools.submit_pr import submit_pr
 from src.document_parser import parse_document_tool
-from src.memory.hooks import pre_model_hook, post_model_hook
 from src.tracing import (
     traced_llm,
     trace_tools,
-    traced_pre_model_hook,
-    traced_post_model_hook,
-    traced_store_search,
-    traced_store_put,
     instrument_middleware,
 )
 
-# AgentCore Memory configuration
 REGION = os.environ.get("AWS_REGION", "us-west-2")
 MEMORY_ID = os.environ.get("AGENTCORE_MEMORY_ID", "")
 
@@ -43,16 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 async def build_agent():
-    """Build and return the compiled orchestrator agent.
-
-    Memory architecture:
-    - AgentCoreMemorySaver (short-term): Persists conversation state,
-      VFS artifacts, and graph execution checkpoints per session.
-    - AgentCoreMemoryStore (long-term): Extracts preferences and facts
-      across sessions via pre/post model hooks.
-    - pre_model_hook: Saves user messages, retrieves past preferences.
-    - post_model_hook: Saves AI responses for pattern extraction.
-    """
+    """Build and return the compiled orchestrator agent."""
     if not MEMORY_ID:
         raise RuntimeError("AGENTCORE_MEMORY_ID environment variable is required")
 
@@ -66,44 +50,38 @@ async def build_agent():
     try:
         gateway_tools = await load_gateway_tools()
     except Exception as exc:
-        logger.warning("MCP tool loading failed, continuing without gateway tools: %s", exc)
+        logger.warning("MCP tool loading failed, continuing without: %s", exc)
         gateway_tools = []
 
     # Build compiled sub-agent graphs
     iac_graph = build_iac_graph(model=model, tools=gateway_tools)
     cicd_graph = build_cicd_graph(model=model)
-    data_eng_graph = build_data_eng_graph(model=model, tools=[])  # browser tools injected at runtime
+    data_eng_graph = build_data_eng_graph(model=model, tools=[])
 
-    # Wrap as CompiledSubAgent dicts for create_deep_agent
+    # Wrap as CompiledSubAgent objects (not plain dicts)
     subagents = [
-        {
-            "name": "iac-agent",
-            "description": "Generates Terraform infrastructure code for AWS resources.",
-            "runnable": iac_graph,
-        },
-        {
-            "name": "cicd-agent",
-            "description": "Generates GitHub Actions CI/CD workflows.",
-            "runnable": cicd_graph,
-        },
-        {
-            "name": "data-eng-agent",
-            "description": "Generates data transformation code with tests.",
-            "runnable": data_eng_graph,
-        },
+        CompiledSubAgent(
+            name="iac-agent",
+            description="Generates Terraform infrastructure code for AWS resources.",
+            runnable=iac_graph,
+        ),
+        CompiledSubAgent(
+            name="cicd-agent",
+            description="Generates GitHub Actions CI/CD workflows.",
+            runnable=cicd_graph,
+        ),
+        CompiledSubAgent(
+            name="data-eng-agent",
+            description="Generates data transformation code with tests.",
+            runnable=data_eng_graph,
+        ),
     ]
 
-    # Short-term memory: checkpoints for state persistence + VFS
+    # Short-term memory: checkpoints
     checkpointer = AgentCoreMemorySaver(memory_id=MEMORY_ID, region_name=REGION)
 
-    # Long-term memory: preferences and facts across sessions
+    # Long-term memory: preferences and facts
     store = AgentCoreMemoryStore(memory_id=MEMORY_ID, region_name=REGION)
-    store = traced_store_search(store)
-    store = traced_store_put(store)
-
-    # Wrap memory hooks with tracing
-    traced_pre_hook = traced_pre_model_hook(pre_model_hook)
-    traced_post_hook = traced_post_model_hook(post_model_hook)
 
     # Instrument middleware with tracing
     TracedOrchestratorMiddleware = instrument_middleware(OrchestratorMiddleware)
@@ -115,8 +93,6 @@ async def build_agent():
         tools=trace_tools([submit_pr, parse_document_tool]),
         checkpointer=checkpointer,
         store=store,
-        pre_model_hook=traced_pre_hook,
-        post_model_hook=traced_post_hook,
         middleware=[TracedOrchestratorMiddleware],
     )
 

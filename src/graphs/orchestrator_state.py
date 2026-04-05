@@ -20,7 +20,6 @@ from langchain.agents.middleware.types import (
     AgentState,
     ModelRequest,
     ModelResponse,
-    PrivateStateAttr,
 )
 from langchain_core.messages import SystemMessage
 from typing_extensions import NotRequired

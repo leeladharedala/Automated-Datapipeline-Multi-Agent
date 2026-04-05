@@ -44,7 +44,9 @@ from langchain_anthropic import ChatAnthropic; print('ChatAnthropic OK'); \
 from langchain_mcp_adapters.client import MultiServerMCPClient; print('MCP adapters OK'); \
 from langchain.agents.middleware.types import AgentMiddleware; print('AgentMiddleware OK'); \
 from deepagents import create_deep_agent; print('create_deep_agent OK'); \
+from deepagents import CompiledSubAgent; print('CompiledSubAgent OK'); \
 from deepagents.middleware._utils import append_to_system_message; print('deepagents middleware OK'); \
+from langchain.agents.middleware import AgentMiddleware, AgentState, ModelRequest, ModelResponse; print('AgentMiddleware OK'); \
 print('All critical packages verified.'); \
 "
 
