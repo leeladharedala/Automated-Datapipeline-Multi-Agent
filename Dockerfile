@@ -61,4 +61,4 @@ ENV PYTHONUNBUFFERED=1
 # checking itself by polling /ping. A Docker-level HEALTHCHECK can
 # conflict with AgentCore's container lifecycle management.
 
-CMD ["opentelemetry-instrument", "python", "-m", "uvicorn", "src.agentcore.server:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["python", "-m", "uvicorn", "src.agentcore.server:app", "--host", "0.0.0.0", "--port", "8080"]

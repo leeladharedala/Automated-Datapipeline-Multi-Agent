@@ -1,21 +1,29 @@
 """
 AgentCore Entrypoint — FastAPI AG-UI server with CopilotKit.
 
-Uvicorn + OTEL boot fast (under 120s). Agent builds lazily on first request.
-/ping always returns 200 so AgentCore sees the container as healthy immediately.
+Uvicorn boots fast. OTEL configured programmatically (no auto-instrument wrapper).
+Agent builds lazily on first request.
 """
 
 import asyncio
 import logging
 import os
 import traceback
-import uuid
 
 import boto3
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from copilotkit import CopilotKitMiddleware
 from copilotkit.langgraph import LangGraphAGUIAgent
+
+# Programmatic OTEL setup (replaces opentelemetry-instrument wrapper)
+try:
+    if os.environ.get("AGENT_OBSERVABILITY_ENABLED", "").lower() == "true":
+        from aws_opentelemetry_distro.aws_opentelemetry_configurator import AwsOpenTelemetryConfigurator
+        configurator = AwsOpenTelemetryConfigurator()
+        configurator.configure()
+except Exception:
+    pass  # OTEL setup is best-effort
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
