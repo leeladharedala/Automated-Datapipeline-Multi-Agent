@@ -69,11 +69,17 @@ def _init_sync():
     try:
         from src.main import build_agent
         print("BOOT: Building agent graph...", flush=True)
-        loop = asyncio.new_event_loop()
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
         _agent_graph = loop.run_until_complete(
             asyncio.wait_for(build_agent(), timeout=120.0)
         )
-        loop.close()
         print("BOOT: Agent graph ready.", flush=True)
     except Exception as exc:
         msg = f"Agent build failed: {type(exc).__name__}: {exc}"
@@ -107,13 +113,39 @@ def invoke(payload, context=None):
         return {"error": "No prompt found in payload."}
 
     try:
-        loop = asyncio.new_event_loop()
+        import uuid
+        from langchain_core.messages import HumanMessage
+
+        # AgentCore passes session ID via context; use it as thread_id
+        session_id = None
+        if context:
+            session_id = getattr(context, "session_id", None)
+        if not session_id:
+            session_id = str(uuid.uuid4())
+
+        config = {
+            "configurable": {
+                "thread_id": session_id,
+                "actor_id": session_id,
+            }
+        }
+
+        # Use existing event loop if available, otherwise create one
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
         result = loop.run_until_complete(
             _agent_graph.ainvoke(
-                {"messages": [{"role": "user", "content": prompt}]},
+                {"messages": [HumanMessage(content=prompt)]},
+                config=config,
             )
         )
-        loop.close()
 
         messages = result.get("messages", [])
         if messages:
