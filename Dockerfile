@@ -1,9 +1,9 @@
-# AgentCore Runtime container
-FROM public.ecr.aws/docker/library/python:3.12-slim
+# AgentCore Runtime container — matches AWS docs pattern
+FROM --platform=linux/arm64 ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 WORKDIR /app
 
-# Install system deps + terraform CLI + actionlint + Node.js (for npx MCP servers)
+# Install system deps + terraform CLI + actionlint + Node.js
 RUN apt-get update && apt-get install -y --no-install-recommends \
         wget unzip ca-certificates curl gnupg && \
     rm -rf /var/lib/apt/lists/*
@@ -12,6 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
+
+# Pre-install MCP server npm packages so npx doesn't download at runtime
+RUN npm install -g @hashicorp/terraform-mcp-server || true
 
 # Terraform
 RUN wget -q https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_arm64.zip && \
@@ -24,9 +27,9 @@ RUN wget -q https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionl
     rm actionlint_1.7.7_linux_arm64.tar.gz
 
 # Python deps — use pip directly (uv can silently fail under QEMU ARM64 emulation)
-COPY requirements.txt ./
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+# Copy uv project files and install deps
+COPY requirements.txt pyproject.toml ./
+RUN uv pip install --system --no-cache -r requirements.txt
 
 # Verify critical packages are actually installed and show versions
 RUN python -c "\
@@ -61,4 +64,4 @@ ENV PYTHONUNBUFFERED=1
 # checking itself by polling /ping. A Docker-level HEALTHCHECK can
 # conflict with AgentCore's container lifecycle management.
 
-CMD ["python", "-m", "uvicorn", "src.agentcore.server:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["opentelemetry-instrument", "python", "src/agentcore/server.py"]
