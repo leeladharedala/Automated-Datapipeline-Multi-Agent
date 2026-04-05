@@ -1,8 +1,9 @@
 """
 AgentCore Entrypoint — BedrockAgentCoreApp with full orchestrator agent.
 
-Uses the official SDK (@app.entrypoint) which works on AgentCore.
-Agent initialization happens lazily on first invocation.
+Initialization happens at module load time (before app.run()) so the
+agent is ready when the first invocation arrives, avoiding the 120s
+cold start timeout.
 """
 
 print("BOOT: Server module loading...", flush=True)
@@ -11,9 +12,11 @@ import asyncio
 import logging
 import os
 import traceback
+import uuid
 
 import boto3
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
+from langchain_core.messages import HumanMessage
 
 print("BOOT: Core imports OK.", flush=True)
 
@@ -24,82 +27,58 @@ logging.basicConfig(
 )
 
 app = BedrockAgentCoreApp()
-
 _agent_graph = None
-_initialized = False
 _init_error = None
 
 
-def _resolve_secrets():
-    arn = os.environ.get("ANTHROPIC_API_KEY_SECRET_ARN", "")
-    if arn and not os.environ.get("ANTHROPIC_API_KEY"):
-        region = os.environ.get("AWS_REGION", "us-west-2")
-        client = boto3.client("secretsmanager", region_name=region)
-        resp = client.get_secret_value(SecretId=arn)
-        os.environ["ANTHROPIC_API_KEY"] = resp["SecretString"]
-        print("BOOT: Resolved ANTHROPIC_API_KEY", flush=True)
-
-
-def _init_sync():
-    """Synchronous wrapper for lazy initialization."""
-    global _agent_graph, _initialized, _init_error
-
-    if _initialized:
-        return
-
-    print("BOOT: Starting initialization...", flush=True)
+def _build_agent_sync():
+    """Build the agent graph synchronously at startup."""
+    global _agent_graph, _init_error
     errors = []
 
+    # Resolve secrets
     try:
-        _resolve_secrets()
+        arn = os.environ.get("ANTHROPIC_API_KEY_SECRET_ARN", "")
+        if arn and not os.environ.get("ANTHROPIC_API_KEY"):
+            region = os.environ.get("AWS_REGION", "us-west-2")
+            client = boto3.client("secretsmanager", region_name=region)
+            resp = client.get_secret_value(SecretId=arn)
+            os.environ["ANTHROPIC_API_KEY"] = resp["SecretString"]
+            print("BOOT: Resolved ANTHROPIC_API_KEY", flush=True)
     except Exception as exc:
-        msg = f"Secret resolution failed: {exc}"
-        print(f"ERROR: {msg}", flush=True)
-        errors.append(msg)
+        errors.append(f"Secrets: {exc}")
+        print(f"ERROR: Secret resolution failed: {exc}", flush=True)
 
-    try:
-        from src.tracing import setup_tracing
-        setup_tracing()
-        print("BOOT: Tracing initialized.", flush=True)
-    except Exception as exc:
-        msg = f"Tracing setup failed: {exc}"
-        print(f"WARNING: {msg}", flush=True)
-        errors.append(msg)
-
+    # Build agent
     try:
         from src.main import build_agent
         print("BOOT: Building agent graph...", flush=True)
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        _agent_graph = loop.run_until_complete(
-            asyncio.wait_for(build_agent(), timeout=120.0)
-        )
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        _agent_graph = loop.run_until_complete(build_agent())
+        loop.close()
         print("BOOT: Agent graph ready.", flush=True)
     except Exception as exc:
-        msg = f"Agent build failed: {type(exc).__name__}: {exc}"
-        print(f"ERROR: {msg}", flush=True)
+        errors.append(f"Build: {type(exc).__name__}: {exc}")
+        print(f"ERROR: Agent build failed: {exc}", flush=True)
         traceback.print_exc()
-        errors.append(msg)
 
     _init_error = "; ".join(errors) if errors else None
-    _initialized = True
+
+
+# Initialize at module load time — before app.run()
+print("BOOT: Starting agent initialization...", flush=True)
+_build_agent_sync()
+print(f"BOOT: Init complete. Agent ready: {_agent_graph is not None}", flush=True)
 
 
 @app.entrypoint
 def invoke(payload, context=None):
     """Process user input through the orchestrator agent."""
-    _init_sync()
-
     if _agent_graph is None:
         return {"error": f"Agent failed to initialize: {_init_error or 'unknown'}"}
 
-    # Extract prompt from various payload formats
+    # Extract prompt
     prompt = payload.get("prompt", "")
     if not prompt:
         prompt = payload.get("input", {}).get("prompt", "")
@@ -113,10 +92,6 @@ def invoke(payload, context=None):
         return {"error": "No prompt found in payload."}
 
     try:
-        import uuid
-        from langchain_core.messages import HumanMessage
-
-        # AgentCore passes session ID via context; use it as thread_id
         session_id = None
         if context:
             session_id = getattr(context, "session_id", None)
@@ -130,22 +105,15 @@ def invoke(payload, context=None):
             }
         }
 
-        # Use existing event loop if available, otherwise create one
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         result = loop.run_until_complete(
             _agent_graph.ainvoke(
                 {"messages": [HumanMessage(content=prompt)]},
                 config=config,
             )
         )
+        loop.close()
 
         messages = result.get("messages", [])
         if messages:
