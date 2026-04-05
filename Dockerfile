@@ -1,4 +1,5 @@
 # AgentCore Runtime container
+# AgentCore Runtime container
 FROM public.ecr.aws/docker/library/python:3.12-slim
 
 WORKDIR /app
@@ -12,6 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
+
+# Pre-install MCP server npm packages so npx doesn't download at runtime
+RUN npm install -g @hashicorp/terraform-mcp-server || true
 
 # Terraform
 RUN wget -q https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_arm64.zip && \
@@ -61,4 +65,4 @@ ENV PYTHONUNBUFFERED=1
 # checking itself by polling /ping. A Docker-level HEALTHCHECK can
 # conflict with AgentCore's container lifecycle management.
 
-CMD ["opentelemetry-instrument", "python", "src/agentcore/server.py"]
+CMD ["python", "-m", "uvicorn", "src.agentcore.server:app", "--host", "0.0.0.0", "--port", "8080"]

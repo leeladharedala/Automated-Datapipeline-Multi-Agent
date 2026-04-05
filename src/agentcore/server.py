@@ -1,72 +1,103 @@
 """
-AgentCore Entrypoint — FastAPI AG-UI server.
+AgentCore Entrypoint — AG-UI protocol server for CopilotKit frontend.
 
-Only FastAPI is imported at module level. All heavy imports (CopilotKit,
-LangChain, etc.) are deferred to first request so uvicorn boots fast.
+FastAPI + uvicorn on port 8080 with /invocations (POST) and /ping (GET).
+CopilotKitMiddleware handles AG-UI event encoding and SSE streaming.
+
+Agent initialization happens at module load time to avoid cold start timeouts.
 """
 
+print("BOOT: Server module loading...", flush=True)
+
+import asyncio
+import logging
+import os
+import traceback
+import uuid
+
+import boto3
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from copilotkit import CopilotKitMiddleware
+from copilotkit.langgraph import LangGraphAGUIAgent
+from langchain_core.messages import HumanMessage
 
-app = FastAPI()
+print("BOOT: All imports OK.", flush=True)
 
-_middleware = None
-_initialized = False
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+)
+
+_agent_graph = None
+_copilotkit_middleware = None
 _init_error = None
 
 
-async def _ensure_init():
-    global _middleware, _initialized, _init_error
-    if _initialized:
-        return
-
-    import asyncio
-    import os
-    import traceback
+def _build_at_startup():
+    """Build agent and CopilotKit middleware at module load time."""
+    global _agent_graph, _copilotkit_middleware, _init_error
     errors = []
 
-    # Secrets
+    # Resolve secrets
     try:
-        import boto3
         arn = os.environ.get("ANTHROPIC_API_KEY_SECRET_ARN", "")
         if arn and not os.environ.get("ANTHROPIC_API_KEY"):
             region = os.environ.get("AWS_REGION", "us-west-2")
             client = boto3.client("secretsmanager", region_name=region)
             resp = client.get_secret_value(SecretId=arn)
             os.environ["ANTHROPIC_API_KEY"] = resp["SecretString"]
+            print("BOOT: Resolved ANTHROPIC_API_KEY", flush=True)
     except Exception as exc:
         errors.append(f"Secrets: {exc}")
+        print(f"ERROR: Secret resolution failed: {exc}", flush=True)
 
-    # Build agent + CopilotKit
+    # Build agent graph
     try:
         from src.main import build_agent
-        from copilotkit import CopilotKitMiddleware
-        from copilotkit.langgraph import LangGraphAGUIAgent
-
-        graph = await build_agent()
-        agent = LangGraphAGUIAgent(graph=graph, name="orchestrator")
-        _middleware = CopilotKitMiddleware(agents=[agent])
+        print("BOOT: Building agent graph...", flush=True)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        _agent_graph = loop.run_until_complete(build_agent())
+        loop.close()
+        print("BOOT: Agent graph ready.", flush=True)
     except Exception as exc:
-        errors.append(f"Build: {exc}")
+        errors.append(f"Build: {type(exc).__name__}: {exc}")
+        print(f"ERROR: Agent build failed: {exc}", flush=True)
         traceback.print_exc()
 
+    # Setup CopilotKit AG-UI middleware
+    if _agent_graph is not None:
+        try:
+            agent = LangGraphAGUIAgent(graph=_agent_graph, name="orchestrator")
+            _copilotkit_middleware = CopilotKitMiddleware(agents=[agent])
+            print("BOOT: CopilotKit AG-UI middleware ready.", flush=True)
+        except Exception as exc:
+            errors.append(f"CopilotKit: {exc}")
+            print(f"ERROR: CopilotKit setup failed: {exc}", flush=True)
+
     _init_error = "; ".join(errors) if errors else None
-    _initialized = True
+
+
+# Initialize at module load time
+print("BOOT: Starting initialization...", flush=True)
+_build_at_startup()
+print(f"BOOT: Init complete. Agent ready: {_agent_graph is not None}", flush=True)
+
+app = FastAPI()
 
 
 @app.get("/ping")
 async def ping():
-    return {"status": "Healthy"}
+    return {"status": "Healthy", "agent_ready": _agent_graph is not None}
 
 
 @app.post("/invocations")
 async def invocations(request: Request):
-    await _ensure_init()
-    if _middleware is None:
-        return JSONResponse(status_code=503, content={"error": f"Not ready: {_init_error}"})
-    return await _middleware.handle_request(request)
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    if _copilotkit_middleware is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": f"Agent not ready: {_init_error or 'unknown'}"},
+        )
+    return await _copilotkit_middleware.handle_request(request)
