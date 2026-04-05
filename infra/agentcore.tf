@@ -39,7 +39,9 @@ resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
     # Observability (OTEL / ADOT)
     AGENT_OBSERVABILITY_ENABLED = "true"
     OTEL_TRACES_EXPORTER        = "otlp"
-    OTEL_EXPORTER_OTLP_ENDPOINT = "https://otlp.${var.aws_region}.amazonaws.com"
+    OTEL_PYTHON_DISTRO = "aws_distro"
+    OTEL_PYTHON_CONFIGURATOR = "aws_configurator"
+    OTEL_EXPORTER_OLTP_PROTOCOL = "http/protobuf"
     OTEL_RESOURCE_ATTRIBUTES    = "service.name=${var.project_name}-${var.environment}"
 
     # GitHub — used by submit_pr tool to create PRs on a target repo

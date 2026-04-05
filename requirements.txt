@@ -29,6 +29,9 @@ PyGithub>=2.9.0
 # YAML parsing
 pyyaml>=6.0
 
+aws-opentelemetry-distro>=0.10.0
+opentelemetry-instrumentation-langchain
+
 # OpenTelemetry tracing
 opentelemetry-api>=1.28.0
 opentelemetry-sdk>=1.28.0

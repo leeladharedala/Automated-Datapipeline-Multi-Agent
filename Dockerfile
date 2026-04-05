@@ -61,4 +61,4 @@ ENV PYTHONUNBUFFERED=1
 # checking itself by polling /ping. A Docker-level HEALTHCHECK can
 # conflict with AgentCore's container lifecycle management.
 
-CMD ["python", "src/agentcore/server.py"]
+CMD ["opentelemetry-instrument", "python", "src/agentcore/server.py"]
