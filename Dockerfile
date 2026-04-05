@@ -28,14 +28,16 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Verify critical packages are actually installed
-RUN python -c "import deepagents; print(f'deepagents {deepagents.__version__}')" && \
-    python -c "import copilotkit; print('copilotkit OK')" && \
-    python -c "import langchain; print('langchain OK')" && \
-    python -c "import langgraph; print('langgraph OK')" && \
-    python -c "import fastapi; print('fastapi OK')" && \
-    python -c "import bedrock_agentcore; print('bedrock-agentcore OK')" && \
-    echo "All critical packages verified."
+# Verify critical packages are actually installed and show versions
+RUN python -c "\
+import deepagents; print(f'deepagents {deepagents.__version__}'); \
+import copilotkit; print('copilotkit OK'); \
+import langchain; print(f'langchain {langchain.__version__}'); \
+import langgraph; print(f'langgraph {langgraph.__version__}'); \
+import fastapi; print(f'fastapi {fastapi.__version__}'); \
+import bedrock_agentcore; print('bedrock-agentcore OK'); \
+print('All critical packages verified.'); \
+"
 
 COPY src/ ./src/
 
