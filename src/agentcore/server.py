@@ -1,97 +1,105 @@
 """
-AgentCore diagnostic server — tests imports one by one.
+AgentCore Entrypoint — AG-UI protocol server for CopilotKit frontend.
 
-This server boots with BedrockAgentCoreApp (which we know works) and
-tests each heavy import individually, reporting which ones succeed
-and which ones crash. Check CloudWatch logs after invoking.
+FastAPI + uvicorn on port 8080 with /invocations (POST) and /ping (GET).
+CopilotKitMiddleware handles AG-UI event encoding and SSE streaming.
 """
 
-print("BOOT: Diagnostic server starting...", flush=True)
+print("BOOT: Server module loading...", flush=True)
 
-import sys
-import traceback
+import asyncio
+import logging
+import os
+from contextlib import asynccontextmanager
 
-from bedrock_agentcore.runtime import BedrockAgentCoreApp
+import boto3
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from copilotkit import CopilotKitMiddleware
+from copilotkit.langgraph import LangGraphAGUIAgent
 
-print("BOOT: BedrockAgentCoreApp imported OK.", flush=True)
+from src.main import build_agent
+from src.tracing import setup_tracing, shutdown_tracing
+from src.tracing.agui import wrap_agui_handler
+from src.tracing.server import create_invocations_tracing_middleware
 
-app = BedrockAgentCoreApp()
+print("BOOT: All imports successful.", flush=True)
 
-# Track import results
-import_results = []
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+)
+
+_agent_graph = None
+_copilotkit_middleware = None
 
 
-def _try_import(description, import_fn):
-    """Try an import and record the result."""
+def _resolve_secrets():
+    """Resolve API keys from Secrets Manager ARNs into env vars at boot."""
+    arn = os.environ.get("ANTHROPIC_API_KEY_SECRET_ARN", "")
+    if arn and not os.environ.get("ANTHROPIC_API_KEY"):
+        region = os.environ.get("AWS_REGION", "us-west-2")
+        client = boto3.client("secretsmanager", region_name=region)
+        resp = client.get_secret_value(SecretId=arn)
+        os.environ["ANTHROPIC_API_KEY"] = resp["SecretString"]
+        print("BOOT: Resolved ANTHROPIC_API_KEY from Secrets Manager", flush=True)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize tracing, secrets, and the orchestrator graph at startup."""
+    global _agent_graph, _copilotkit_middleware
+
     try:
-        import_fn()
-        msg = f"OK: {description}"
-        print(f"BOOT: {msg}", flush=True)
-        import_results.append(msg)
+        setup_tracing()
+        print("BOOT: Tracing initialized.", flush=True)
     except Exception as exc:
-        msg = f"FAIL: {description} -> {type(exc).__name__}: {exc}"
-        print(f"BOOT: {msg}", flush=True)
+        print(f"WARNING: Tracing setup failed: {exc}", flush=True)
+
+    try:
+        _resolve_secrets()
+    except Exception as exc:
+        print(f"ERROR: Secret resolution failed: {exc}", flush=True)
+
+    try:
+        print("BOOT: Building orchestrator agent graph...", flush=True)
+        _agent_graph = await asyncio.wait_for(build_agent(), timeout=120.0)
+
+        agent = LangGraphAGUIAgent(graph=_agent_graph, name="orchestrator")
+        _copilotkit_middleware = CopilotKitMiddleware(agents=[agent])
+        _copilotkit_middleware.handle_request = wrap_agui_handler(
+            _copilotkit_middleware.handle_request
+        )
+        print("BOOT: Agent graph initialized and ready.", flush=True)
+    except asyncio.TimeoutError:
+        print("ERROR: Agent build timed out after 120s.", flush=True)
+    except Exception as exc:
+        print(f"ERROR: Agent build failed: {exc}", flush=True)
+        import traceback
         traceback.print_exc()
-        import_results.append(msg)
+
+    yield
+
+    _agent_graph = None
+    _copilotkit_middleware = None
+    try:
+        shutdown_tracing()
+    except Exception:
+        pass
 
 
-# Test each import group
-_try_import("boto3", lambda: __import__("boto3"))
-_try_import("yaml", lambda: __import__("yaml"))
-_try_import("fastapi", lambda: __import__("fastapi"))
-_try_import("uvicorn", lambda: __import__("uvicorn"))
-_try_import("opentelemetry.api", lambda: __import__("opentelemetry"))
-_try_import("opentelemetry.sdk", lambda: __import__("opentelemetry.sdk.trace"))
-_try_import("opentelemetry.exporter.grpc",
-            lambda: __import__("opentelemetry.exporter.otlp.proto.grpc"))
-_try_import("opentelemetry.exporter.http",
-            lambda: __import__("opentelemetry.exporter.otlp.proto.http"))
-_try_import("opentelemetry.propagators.aws",
-            lambda: __import__("opentelemetry.propagators.aws"))
-_try_import("langchain_core",
-            lambda: __import__("langchain_core"))
-_try_import("langchain",
-            lambda: __import__("langchain"))
-_try_import("langchain.agents.middleware.types",
-            lambda: __import__("langchain.agents.middleware.types"))
-_try_import("langchain_anthropic",
-            lambda: __import__("langchain_anthropic"))
-_try_import("langgraph",
-            lambda: __import__("langgraph"))
-_try_import("langgraph_checkpoint_aws",
-            lambda: __import__("langgraph_checkpoint_aws"))
-_try_import("deepagents",
-            lambda: __import__("deepagents"))
-_try_import("copilotkit",
-            lambda: __import__("copilotkit"))
-_try_import("copilotkit.langgraph",
-            lambda: __import__("copilotkit.langgraph"))
-_try_import("langchain_mcp_adapters",
-            lambda: __import__("langchain_mcp_adapters"))
-_try_import("github (PyGithub)",
-            lambda: __import__("github"))
-_try_import("starlette",
-            lambda: __import__("starlette"))
-
-# Now try the actual src imports
-_try_import("src.tracing",
-            lambda: __import__("src.tracing"))
-_try_import("src.main",
-            lambda: __import__("src.main"))
-
-print(f"BOOT: Import diagnostics complete. {len(import_results)} tests run.", flush=True)
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(create_invocations_tracing_middleware())
 
 
-@app.entrypoint
-def invoke(payload, context=None):
-    """Return import diagnostic results."""
-    return {
-        "result": "\n".join(import_results),
-        "total": len(import_results),
-        "failures": [r for r in import_results if r.startswith("FAIL")],
-    }
+@app.get("/ping")
+async def ping():
+    return {"status": "Healthy", "agent_ready": _agent_graph is not None}
 
 
-if __name__ == "__main__":
-    print("BOOT: Starting diagnostic server...", flush=True)
-    app.run()
+@app.post("/invocations")
+async def invocations(request: Request):
+    if _copilotkit_middleware is None:
+        return JSONResponse(status_code=503, content={"error": "Agent not ready"})
+    return await _copilotkit_middleware.handle_request(request)
