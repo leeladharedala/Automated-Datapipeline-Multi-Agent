@@ -109,8 +109,9 @@ def traced_tool(tool: BaseTool) -> BaseTool:
                 record_exception(span, exc)
                 raise
 
-    tool.invoke = traced_invoke  # type: ignore[assignment]
-    tool.ainvoke = traced_ainvoke  # type: ignore[assignment]
+    # Use object.__setattr__ to bypass Pydantic v2 field validation on tools
+    object.__setattr__(tool, "invoke", traced_invoke)
+    object.__setattr__(tool, "ainvoke", traced_ainvoke)
     return tool
 
 

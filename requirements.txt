@@ -11,7 +11,7 @@ langchain-mcp-adapters>=0.2.0
 copilotkit==0.1.84
 
 # AgentCore Memory (checkpointer + store for LangGraph)
-langgraph-checkpoint-aws>=0.2.0
+langgraph-checkpoint-aws==0.2.0
 
 # AWS SDK
 boto3>=1.42.0

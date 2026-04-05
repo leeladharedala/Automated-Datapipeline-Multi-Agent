@@ -35,8 +35,15 @@ import deepagents; print(f'deepagents {deepagents.__version__}'); \
 import copilotkit; print('copilotkit OK'); \
 import langchain; print(f'langchain {langchain.__version__}'); \
 import langgraph; print(f'langgraph {version(\"langgraph\")}'); \
+import langgraph_checkpoint_aws; print('langgraph-checkpoint-aws OK'); \
+from langgraph_checkpoint_aws import AgentCoreMemorySaver, AgentCoreMemoryStore; print('Memory classes OK'); \
 import fastapi; print(f'fastapi {fastapi.__version__}'); \
 import bedrock_agentcore; print('bedrock-agentcore OK'); \
+from langchain_anthropic import ChatAnthropic; print('ChatAnthropic OK'); \
+from langchain_mcp_adapters.client import MultiServerMCPClient; print('MCP adapters OK'); \
+from langchain.agents.middleware.types import AgentMiddleware; print('AgentMiddleware OK'); \
+from deepagents import create_deep_agent; print('create_deep_agent OK'); \
+from deepagents.middleware._utils import append_to_system_message; print('deepagents middleware OK'); \
 print('All critical packages verified.'); \
 "
 

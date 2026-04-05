@@ -120,7 +120,8 @@ def traced_store_search(store: Any) -> Any:
                 record_exception(span, exc)
                 raise
 
-    store.search = wrapped_search  # type: ignore[assignment]
+    # Use object.__setattr__ to bypass Pydantic v2 field validation on store
+    object.__setattr__(store, "search", wrapped_search)
     return store
 
 
@@ -147,7 +148,8 @@ def traced_store_put(store: Any) -> Any:
                 record_exception(span, exc)
                 raise
 
-    store.put = wrapped_put  # type: ignore[assignment]
+    # Use object.__setattr__ to bypass Pydantic v2 field validation on store
+    object.__setattr__(store, "put", wrapped_put)
     return store
 
 
