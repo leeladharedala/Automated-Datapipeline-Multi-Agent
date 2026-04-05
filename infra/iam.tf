@@ -62,11 +62,20 @@ resource "aws_iam_role_policy" "ecr_pull" {
   policy = data.aws_iam_policy_document.ecr_pull.json
 }
 
-# ── AgentCore Memory ──────────────────────────────────────────
+# ── AgentCore Memory + Runtime ─────────────────────────────────
 
 data "aws_iam_policy_document" "agentcore_memory" {
   statement {
-    sid    = "AgentCoreMemory"
+    sid    = "AgentCoreFullAccess"
+    effect = "Allow"
+    actions = [
+      "bedrock-agentcore:*",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "BedrockAgentMemory"
     effect = "Allow"
     actions = [
       "bedrock:GetAgentMemory",
