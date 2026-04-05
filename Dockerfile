@@ -37,7 +37,7 @@ import langchain; print(f'langchain {langchain.__version__}'); \
 import langgraph; print(f'langgraph {version(\"langgraph\")}'); \
 import langgraph_checkpoint_aws; print('langgraph-checkpoint-aws OK'); \
 from langgraph_checkpoint_aws import AgentCoreMemorySaver, AgentCoreMemoryStore; print('Memory classes OK'); \
-AgentCoreMemorySaver(memory_id='test', region_name='us-west-2'); print('AgentCoreMemorySaver OK')
+AgentCoreMemorySaver(memory_id='test', region_name='us-west-2'); print('AgentCoreMemorySaver OK'); \
 import fastapi; print(f'fastapi {fastapi.__version__}'); \
 import bedrock_agentcore; print('bedrock-agentcore OK'); \
 from langchain_anthropic import ChatAnthropic; print('ChatAnthropic OK'); \
