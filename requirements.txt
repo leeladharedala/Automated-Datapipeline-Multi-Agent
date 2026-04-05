@@ -3,38 +3,36 @@ deepagents==0.4.8
 langgraph==1.0.10
 langgraph-prebuilt==1.0.8
 langchain==1.2.10
-langchain-anthropic==1.4.0
-langchain-openai==1.1.12
-
-
-# MCP integration
-langchain-mcp-adapters==0.2.2
+langchain-anthropic>=1.3.4
+langchain-openai>=1.1.0
+langchain-mcp-adapters>=0.2.0
 
 # CopilotKit AG-UI integration
 copilotkit==0.1.84
 
-# AgentCore Memory
+# AgentCore Memory (checkpointer + store for LangGraph)
 langgraph-checkpoint-aws>=0.2.0
 
+# AWS SDK
+boto3>=1.42.0
+
+# AgentCore Runtime SDK
 bedrock-agentcore>=1.0.0
 
-# AWS SDK
-boto3==1.42.83
+# Web server
+fastapi>=0.115.0
+uvicorn>=0.34.0
 
 # GitHub PR submission
-PyGithub==2.9.0
+PyGithub>=2.9.0
 
 # YAML parsing
-pyyaml==6.0.3
+pyyaml>=6.0
 
 # OpenTelemetry tracing
-opentelemetry-api==1.40.0
-opentelemetry-sdk==1.40.0
-opentelemetry-exporter-otlp-proto-grpc==1.40.0
-opentelemetry-exporter-otlp-proto-http==1.40.0
-opentelemetry-propagator-aws-xray==1.0.2
-opentelemetry-sdk-extension-aws==2.1.0
-
-# Testing
-pytest==8.4.2
-hypothesis==6.151.10
+opentelemetry-api>=1.28.0
+opentelemetry-sdk>=1.28.0
+opentelemetry-exporter-otlp-proto-grpc>=1.28.0
+opentelemetry-exporter-otlp-proto-http>=1.28.0
+opentelemetry-propagator-aws-xray>=1.0.0
+opentelemetry-sdk-extension-aws>=2.0.0
