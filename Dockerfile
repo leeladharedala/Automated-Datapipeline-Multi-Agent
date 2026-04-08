@@ -64,6 +64,12 @@ EXPOSE 8080
 ENV PORT=8080
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
+# Suppress verbose LangChain GenAI message content from OTel spans/logs.
+# Without this, the full conversation history (including generated Terraform/YAML)
+# is logged as body in every LangChain instrumentation log record, causing
+# huge OTLP payloads and potential 400s from the collector size limits.
+ENV OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=false
+
 
 # NOTE: Do NOT add a Docker HEALTHCHECK — AgentCore manages health
 # checking itself by polling /ping. A Docker-level HEALTHCHECK can
