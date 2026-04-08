@@ -52,7 +52,7 @@ def traced_node(
             try:
                 result = node_fn(state, *args, **kwargs)
                 if isinstance(result, dict):
-                    span.set_attribute("node.output_keys", list(result.keys()))
+                    span.set_attribute("node.output_keys", ", ".join(result.keys()))
                 span.set_status(StatusCode.OK)
                 return result
             except Exception as exc:

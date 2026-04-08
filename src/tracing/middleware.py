@@ -94,7 +94,10 @@ def instrument_middleware(middleware_cls: type) -> type:
                 tracer = trace.get_tracer(_TRACER_NAME)
                 with tracer.start_as_current_span("middleware:dispatch_update") as span:
                     agents = list(updates["dispatch_statuses"].keys())
-                    span.set_attribute("middleware.agents_updated", agents)
+                    # OTel attributes must be scalar or sequence of single type;
+                    # join list to comma-separated string to avoid 400 Bad Request.
+                    span.set_attribute("middleware.agents_updated", ", ".join(agents))
+                    span.set_attribute("middleware.agent_count", len(agents))
                     span.set_status(StatusCode.OK)
             return updates
 
@@ -106,7 +109,10 @@ def instrument_middleware(middleware_cls: type) -> type:
                 tracer = trace.get_tracer(_TRACER_NAME)
                 with tracer.start_as_current_span("middleware:dispatch_update") as span:
                     agents = list(updates["dispatch_statuses"].keys())
-                    span.set_attribute("middleware.agents_updated", agents)
+                    # OTel attributes must be scalar or sequence of single type;
+                    # join list to comma-separated string to avoid 400 Bad Request.
+                    span.set_attribute("middleware.agents_updated", ", ".join(agents))
+                    span.set_attribute("middleware.agent_count", len(agents))
                     span.set_status(StatusCode.OK)
             return updates
 
