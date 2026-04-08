@@ -1,5 +1,4 @@
 # AgentCore Runtime container
-# AgentCore Runtime container
 FROM public.ecr.aws/docker/library/python:3.12-slim
 
 WORKDIR /app
@@ -56,6 +55,29 @@ print('All critical packages verified.'); \
 
 COPY src/ ./src/
 
+# Verify tracing module imports work after src/ is copied.
+# Catches missing opentelemetry packages or broken import paths at build time.
+RUN PYTHONPATH=/app python -c "\
+import sys; sys.path.insert(0, '/app'); \
+print('Verifying tracing module imports...'); \
+from src.tracing.provider import setup_tracing, get_tracer, shutdown_tracing; print('  tracing.provider OK'); \
+from src.tracing.utils import record_exception, traced, traced_span; print('  tracing.utils OK'); \
+from src.tracing.tools import trace_tools, traced_tool; print('  tracing.tools OK'); \
+from src.tracing.middleware import instrument_middleware; print('  tracing.middleware OK'); \
+from src.tracing.memory import traced_pre_model_hook, traced_post_model_hook; print('  tracing.memory OK'); \
+from src.tracing.llm import traced_llm; print('  tracing.llm OK'); \
+from src.tracing.parser import traced_classify_and_extract, traced_parse_pipeline_document; print('  tracing.parser OK'); \
+from src.tracing.agui import wrap_agui_handler; print('  tracing.agui OK'); \
+from src.tracing.retry import traced_retry_loop; print('  tracing.retry OK'); \
+from src.tracing.graphs import instrument_graph; print('  tracing.graphs OK'); \
+from src.tracing import setup_tracing; print('  tracing __init__ OK'); \
+setup_tracing(); print('  setup_tracing() ran OK'); \
+tracer = get_tracer('build-verify'); \
+with tracer.start_as_current_span('build_verify_span') as s: s.set_attribute('build', True); \
+print('  span creation OK'); \
+print('All tracing imports verified. Build OK.'); \
+"
+
 EXPOSE 8080
 ENV PORT=8080
 ENV PYTHONPATH=/app
@@ -65,4 +87,4 @@ ENV PYTHONUNBUFFERED=1
 # checking itself by polling /ping. A Docker-level HEALTHCHECK can
 # conflict with AgentCore's container lifecycle management.
 
-CMD ["opentelemetry-instrument" ,"python", "src/agentcore/server.py"]
+CMD ["opentelemetry-instrument", "python", "src/agentcore/server.py"]
