@@ -12,7 +12,7 @@ name: Deploy AgentCore Pipeline
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - "src/**"
       - "Dockerfile"
