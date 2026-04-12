@@ -1,7 +1,7 @@
 # ──────────────────────────────────────────────────────────────
 # Deploy Pipeline
 #
-# Triggers: push to main, manual dispatch
+# Triggers: push to master, manual dispatch
 # Steps:
 #   1. Build & push Docker image to ECR
 #   2. Sync Anthropic API key → Secrets Manager

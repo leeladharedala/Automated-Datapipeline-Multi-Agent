@@ -35,7 +35,7 @@ async def build_agent():
         raise RuntimeError("AGENTCORE_MEMORY_ID environment variable is required")
 
     model = ChatAnthropic(
-        model="claude-sonnet-4-6-20250514",
+        model="claude-sonnet-4-6",
         temperature=0,
     )
 
