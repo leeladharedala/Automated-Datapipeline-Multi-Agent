@@ -4,28 +4,16 @@ AgentCore Entrypoint — matches the official FAST LangGraph pattern.
 Uses BedrockAgentCoreApp with async streaming entrypoint.
 """
 
+import asyncio
 import logging
 import os
+import traceback
+
 import boto3
 from bedrock_agentcore.runtime import BedrockAgentCoreApp, RequestContext
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Initialise tracing — but only when opentelemetry-instrument hasn't already
-# done so.  The Dockerfile CMD uses `opentelemetry-instrument python ...` which
-# sets up its own TracerProvider.  Calling setup_tracing() on top would create
-# a second provider and drop spans from the first one.
-_auto_instrumented = os.environ.get("OTEL_PYTHON_AUTO_INSTRUMENTATION_ENABLED", "").lower() == "true"
-if not _auto_instrumented:
-    try:
-        from src.tracing import setup_tracing
-        setup_tracing()
-        logger.info("OpenTelemetry tracing initialised (manual)")
-    except Exception as _tracing_exc:
-        logger.warning("Tracing setup failed (non-fatal): %s", _tracing_exc)
-else:
-    logger.info("OpenTelemetry tracing managed by opentelemetry-instrument")
 
 app = BedrockAgentCoreApp()
 

@@ -264,12 +264,28 @@ def _validate(state: DataEngState) -> dict[str, Any]:
 
     # Step 3: Run pytest
     try:
-        result = code_interpreter.execute_code("import subprocess; r = subprocess.run(['pytest', '/tests/test_transform.py', '-v'], capture_output=True, text=True); print(r.stdout); print(r.stderr); exit(r.returncode)")
+        with traced_span("tool:data_eng.pytest", {
+            "agent.graph": "data_eng",
+            "agent.node": "validate",
+            "agent.artifact_count": len(artifacts),
+        }):
+            result = code_interpreter.execute_code(
+                "import subprocess; "
+                "r = subprocess.run(['pytest', '/tests/test_transform.py', '-v'], "
+                "capture_output=True, text=True); "
+                "print(r.stdout); print(r.stderr); exit(r.returncode)"
+            )
     except Exception as exc:
         result = str(exc)
 
     output = str(result)
-    passed = "passed" in output.lower() and "failed" not in output.lower()
+
+    # Check for explicit pytest result markers.
+    # pytest output contains "X passed" and/or "X failed" — check both.
+    output_lower = output.lower()
+    has_passed = "passed" in output_lower
+    has_failed = "failed" in output_lower or "error" in output_lower
+    passed = has_passed and not has_failed
 
     return {
         "validation_passed": passed,
@@ -283,8 +299,17 @@ def _fix(state: DataEngState, model, tools: list) -> dict[str, Any]:
 
     attempt = state.get("attempt", 0) + 1
     error_output = state.get("validation_output", "")
+    task = state.get("task_description", "")
+    inferred_schema = state.get("inferred_schema", {})
 
-    user_msg = (
+    user_msg = f"## Original Task\n{task}\n\n"
+    if inferred_schema and inferred_schema.get("columns"):
+        schema_lines = [
+            f"- {col['name']} ({col['type']}, nullable={col['nullable']})"
+            for col in inferred_schema["columns"]
+        ]
+        user_msg += "## Inferred Schema\n" + "\n".join(schema_lines) + "\n\n"
+    user_msg += (
         f"## Pytest Failure (attempt {attempt})\n{error_output}\n\n"
         "Fix the broken transformation or test files in /src/transformations/ and /tests/."
     )

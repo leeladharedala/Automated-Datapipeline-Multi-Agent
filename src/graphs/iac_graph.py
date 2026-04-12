@@ -176,14 +176,33 @@ def _generate(state: IaCState, model) -> dict[str, Any]:
 def _validate(state: IaCState, model) -> dict[str, Any]:
     """Agent node: create_deep_agent with execute to run terraform validate."""
     task = state.get("task_description", "")
+    research = state.get("research_context", "")
+    artifacts = state.get("tf_artifacts", {})
+    files_list = ", ".join(artifacts.values()) if artifacts else "unknown"
+
+    user_msg = (
+        f"## Task\n{task}\n\n"
+        f"## Research Context Summary\n{research[:500]}\n\n"
+        f"## Generated Files\n{files_list}\n\n"
+        "Run terraform validation and plan now."
+    )
     with traced_span("agent:iac.validate", {
         "agent.graph": "iac",
         "agent.node": "validate",
         "agent.role": "validator",
     }):
-        response = _run_agent(_VALIDATE_PROMPT, f"## Task\n{task}\n\nRun terraform validation and plan now.", model)
+        response = _run_agent(_VALIDATE_PROMPT, user_msg, model)
 
-    passed = "PASSED" in response.upper() or "success" in response.lower()
+    # Check for explicit PASSED/FAILED keywords from the prompt.
+    # Avoid matching generic "success" which can appear in failure context.
+    upper = response.upper()
+    if "VALIDATION FAILED" in upper or "VALIDATION: FAILED" in upper:
+        passed = False
+    elif "VALIDATION PASSED" in upper or "VALIDATION: PASSED" in upper:
+        passed = True
+    else:
+        # Fallback: absence of explicit FAILED with presence of PASSED
+        passed = "PASSED" in upper and "FAILED" not in upper
     return {
         "validation_passed": passed,
         "validation_output": response,
@@ -194,8 +213,10 @@ def _fix(state: IaCState, model) -> dict[str, Any]:
     """Agent node: create_deep_agent with edit_file to fix broken Terraform files."""
     attempt = state.get("attempt", 0) + 1
     error_output = state.get("validation_output", "")
+    task = state.get("task_description", "")
 
     user_msg = (
+        f"## Original Task\n{task}\n\n"
         f"## Validation Error (attempt {attempt})\n{error_output}\n\n"
         "Fix the broken Terraform files in /infra/."
     )

@@ -119,14 +119,31 @@ def _generate(state: CICDState, model) -> dict[str, Any]:
 
 def _validate(state: CICDState, model) -> dict[str, Any]:
     """Agent node: create_deep_agent with execute to run actionlint."""
+    task = state.get("task_description", "")
+    artifacts = state.get("workflow_artifacts", {})
+    files_list = ", ".join(artifacts.values()) if artifacts else "unknown"
+
+    user_msg = (
+        f"## Task\n{task}\n\n"
+        f"## Generated Files\n{files_list}\n\n"
+        "Run actionlint validation now."
+    )
     with traced_span("agent:cicd.validate", {
         "agent.graph": "cicd",
         "agent.node": "validate",
         "agent.role": "validator",
     }):
-        response = _run_agent(_VALIDATE_PROMPT, "Run actionlint validation now.", model)
+        response = _run_agent(_VALIDATE_PROMPT, user_msg, model)
 
-    passed = "PASSED" in response.upper() or "success" in response.lower()
+    # Check for explicit PASSED/FAILED keywords from the prompt.
+    # Avoid matching generic "success" which can appear in failure context.
+    upper = response.upper()
+    if "VALIDATION FAILED" in upper or "VALIDATION: FAILED" in upper:
+        passed = False
+    elif "VALIDATION PASSED" in upper or "VALIDATION: PASSED" in upper:
+        passed = True
+    else:
+        passed = "PASSED" in upper and "FAILED" not in upper
     return {
         "validation_passed": passed,
         "validation_output": response,
@@ -137,8 +154,10 @@ def _fix(state: CICDState, model) -> dict[str, Any]:
     """Agent node: create_deep_agent with edit_file to fix actionlint errors."""
     attempt = state.get("attempt", 0) + 1
     error_output = state.get("validation_output", "")
+    task = state.get("task_description", "")
 
     user_msg = (
+        f"## Original Task\n{task}\n\n"
         f"## Actionlint Error (attempt {attempt})\n{error_output}\n\n"
         "Fix the broken workflow files in /.github/workflows/."
     )

@@ -50,13 +50,23 @@ def create_mcp_client() -> MultiServerMCPClient:
     )
 
 
-async def load_gateway_tools() -> list:
+async def load_gateway_tools() -> tuple["MultiServerMCPClient", list]:
     """Load all tools from both MCP servers.
 
-    Returns a list of LangChain-compatible tools that can be
-    passed to create_deep_agent's tools parameter or bound
-    to a subagent config.
+    Returns a (client, tools) tuple. The caller MUST keep the client
+    reference alive for the lifetime of tool usage — the MCP stdio
+    processes are tied to the client's async context.
+
+    Usage::
+
+        client, tools = await load_gateway_tools()
+        # ... use tools while client is alive ...
+        # client will be cleaned up when no longer referenced
+
+    Returns:
+        A tuple of (MultiServerMCPClient, list of LangChain-compatible tools).
     """
     client = create_mcp_client()
-    tools = await client.get_tools()
-    return tools
+    await client.__aenter__()
+    tools = client.get_tools()
+    return client, tools

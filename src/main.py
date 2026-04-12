@@ -35,16 +35,14 @@ async def build_agent():
         raise RuntimeError("AGENTCORE_MEMORY_ID environment variable is required")
 
     model = ChatAnthropic(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-4-6-20250514",
         temperature=0,
     )
 
-    # Load MCP tools from Terraform Registry + AWS Docs servers
-    try:
-        gateway_tools = await load_gateway_tools()
-    except Exception as exc:
-        logger.warning("MCP tool loading failed, continuing without: %s", exc)
-        gateway_tools = []
+    # Skip MCP tools at startup — they require npx/uvx downloads that
+    # can take 60+ seconds and cause AgentCore's 120s init timeout.
+    # MCP tools will be loaded on-demand when the IaC subagent runs.
+    gateway_tools = []
 
     # Build compiled sub-agent graphs
     iac_graph = build_iac_graph(model=model, tools=gateway_tools)

@@ -61,10 +61,12 @@ jobs:
 
     steps:
       - name: Validate confirmation
+        env:
+          CONFIRM_INPUT: ${{ inputs.confirm }}
         run: |
-          if [ "${{ inputs.confirm }}" != "destroy" ]; then
+          if [ "$CONFIRM_INPUT" != "destroy" ]; then
             echo "❌ Confirmation failed. You must type 'destroy' to proceed."
-            echo "   Received: '${{ inputs.confirm }}'"
+            echo "   Received: '$CONFIRM_INPUT'"
             exit 1
           fi
           echo "✅ Destruction confirmed for environment: ${{ env.TF_ENVIRONMENT }}"
