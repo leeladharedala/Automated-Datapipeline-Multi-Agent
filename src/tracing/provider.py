@@ -120,7 +120,7 @@ def _build_exporter(protocol: str, endpoint: str):
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
             OTLPSpanExporter as HTTPExporter,
         )
-        return HTTPExporter(endpoint=endpoint)
+        return HTTPExporter(endpoint=f"{endpoint.rstrip('/')}/v1/traces")
 
     # Default to gRPC
     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (

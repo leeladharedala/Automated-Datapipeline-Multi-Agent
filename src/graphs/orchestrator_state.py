@@ -219,7 +219,6 @@ class OrchestratorMiddleware(AgentMiddleware[OrchestratorState, Any, Any]):
                                     )
                                     result_updates[agent_name] = summary
                                 break
-                    break  # Only check the immediately preceding message
 
         if not status_updates and not result_updates:
             return None
