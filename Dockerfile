@@ -16,6 +16,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
 # Pre-install MCP server npm packages so npx doesn't download at runtime
 RUN npm install -g @hashicorp/terraform-mcp-server || true
 
+# Pre-install AWS Docs MCP server via pip (uvx fails under QEMU ARM64 emulation)
+RUN pip install --no-cache-dir "awslabs.aws-documentation-mcp-server"
+
 # Terraform
 RUN wget -q https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_arm64.zip && \
     unzip terraform_1.9.8_linux_arm64.zip -d /usr/local/bin/ && \
