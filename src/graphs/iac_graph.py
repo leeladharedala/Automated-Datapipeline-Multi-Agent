@@ -13,14 +13,19 @@ memory via the shared VFS. The research node uses Sonnet 4.6 to intelligently
 call Terraform Registry and AWS Docs MCP tools with correct input schemas.
 """
 
+import asyncio
+import logging
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END, StateGraph
 
 from src.graphs.state import IaCState
+from src.graphs._utils import get_task_description
 from src.tracing.graphs import instrument_graph
 from src.tracing.utils import traced_span
+
+logger = logging.getLogger(__name__)
 
 # --- System prompts for agent nodes ---
 
@@ -123,35 +128,61 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None) -> str:
     return ""
 
 
-def _research(state: IaCState, model, tools: list) -> dict[str, Any]:
+def _research(state: IaCState, model, tools_cache: dict) -> dict[str, Any]:
     """Agent node: create_deep_agent with MCP tools to research AWS resource schemas.
 
     Uses Sonnet 4.6 to intelligently call Terraform Registry and AWS Docs MCP
     tools with the correct input schemas, extracting resource types, arguments,
     and best practices needed for code generation.
+
+    If no tools were provided at graph build time, lazily loads them from the
+    Terraform Registry and AWS Docs MCP servers on first invocation. The loaded
+    tools and client are cached in tools_cache for subsequent calls.
     """
-    task = state.get("task_description", "")
-    if not tools or not task:
-        return {"research_context": "No research tools available or no task provided."}
+    task = get_task_description(state)
+    if not task:
+        return {"research_context": "No task provided."}
+
+    # Lazy-load MCP tools if none were provided at build time
+    active_tools = tools_cache.get("tools", [])
+    if not active_tools:
+        try:
+            from src.tools.gateway import load_gateway_tools
+            logger.info("Lazy-loading Terraform Registry + AWS Docs MCP tools...")
+            loop = asyncio.new_event_loop()
+            try:
+                client, active_tools = loop.run_until_complete(load_gateway_tools())
+            finally:
+                loop.close()
+            # Cache so subsequent calls reuse the same tools and client
+            tools_cache["tools"] = active_tools
+            tools_cache["client"] = client
+            logger.info("Loaded %d MCP tools (Terraform Registry + AWS Docs)", len(active_tools))
+        except Exception as exc:
+            logger.warning("Failed to load MCP tools, proceeding without research: %s", exc)
+            return {"research_context": "MCP tools unavailable; skipping research phase."}
+
+    if not active_tools:
+        return {"research_context": "No research tools available."}
 
     with traced_span("agent:iac.research", {
         "agent.graph": "iac",
         "agent.node": "research",
         "agent.role": "researcher",
-        "agent.tool_count": len(tools),
+        "agent.tool_count": len(active_tools),
     }):
         response = _run_agent(
             _RESEARCH_PROMPT,
             f"## Task\n{task}\n\nResearch the AWS resources and Terraform configuration needed for this task.",
             model,
-            tools=tools,
+            tools=active_tools,
         )
     return {"research_context": response, "messages": [AIMessage(content=response)]}
 
 
 def _generate(state: IaCState, model) -> dict[str, Any]:
     """Agent node: create_deep_agent with write_file to generate Terraform files."""
-    task = state.get("task_description", "")
+    task = get_task_description(state)
     research = state.get("research_context", "")
 
     user_msg = f"## Task\n{task}\n\n## Research Context\n{research}"
@@ -175,7 +206,7 @@ def _generate(state: IaCState, model) -> dict[str, Any]:
 
 def _validate(state: IaCState, model) -> dict[str, Any]:
     """Agent node: create_deep_agent with execute to run terraform validate."""
-    task = state.get("task_description", "")
+    task = get_task_description(state)
     research = state.get("research_context", "")
     artifacts = state.get("tf_artifacts", {})
     files_list = ", ".join(artifacts.values()) if artifacts else "unknown"
@@ -213,7 +244,7 @@ def _fix(state: IaCState, model) -> dict[str, Any]:
     """Agent node: create_deep_agent with edit_file to fix broken Terraform files."""
     attempt = state.get("attempt", 0) + 1
     error_output = state.get("validation_output", "")
-    task = state.get("task_description", "")
+    task = get_task_description(state)
 
     user_msg = (
         f"## Original Task\n{task}\n\n"
@@ -283,8 +314,11 @@ def build_iac_graph(model, tools=None):
     graph = StateGraph(IaCState)
 
     # Closures capture model and tools from factory args
+    # Cache for lazily-loaded MCP tools (loaded once on first research call)
+    _cached_tools: dict[str, Any] = {"tools": tools or [], "client": None}
+
     def research(state: IaCState) -> dict[str, Any]:
-        return _research(state, model, tools or [])
+        return _research(state, model, _cached_tools)
 
     def generate(state: IaCState) -> dict[str, Any]:
         return _generate(state, model)

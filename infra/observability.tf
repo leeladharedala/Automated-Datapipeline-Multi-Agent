@@ -46,6 +46,18 @@ resource "aws_xray_group" "agent_pipeline" {
   filter_expression = "service(\"${var.project_name}-${var.environment}\")"
 }
 
+# ── X-Ray Indexing Rule (Transaction Search) ─────────────────
+
+resource "aws_xray_indexing_rule" "agent_pipeline" {
+  rule_name = "Default"
+
+  rule {
+    probabilistic {
+      desired_rule_percentage = 100
+    }
+  }
+}
+
 # ── CloudWatch Log Group ──────────────────────────────────────
 
 resource "aws_cloudwatch_log_group" "agent_runtime" {

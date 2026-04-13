@@ -35,13 +35,13 @@ async def build_agent():
         raise RuntimeError("AGENTCORE_MEMORY_ID environment variable is required")
 
     model = ChatAnthropic(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-4-6-20250514",
         temperature=0,
     )
 
-    # Skip MCP tools at startup — they require npx/uvx downloads that
-    # can take 60+ seconds and cause AgentCore's 120s init timeout.
-    # MCP tools will be loaded on-demand when the IaC subagent runs.
+    # MCP tools (Terraform Registry + AWS Docs) are loaded lazily on first
+    # IaC research node invocation to avoid AgentCore's 120s init timeout.
+    # The npx/uvx downloads happen at research time, not at startup.
     gateway_tools = []
 
     # Build compiled sub-agent graphs

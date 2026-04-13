@@ -1,17 +1,18 @@
 """Data Engineering SubAgent Graph — transformation code generation with pytest validation.
 
 Builds a compiled LangGraph StateGraph that:
-1. Generates data transformation code via a mini DeepAgent with write_file + browser tools (agent node)
-2. Validates with pytest via code_interpreter (plain function)
-3. Self-heals on validation failure via a mini DeepAgent with edit_file + browser tools (agent node)
-4. Produces a final pass/fail report (pure function)
+1. Samples data schema via a mini DeepAgent with execute (agent node)
+2. Generates data transformation code via a mini DeepAgent with write_file + browser tools (agent node)
+3. Validates with pytest via a mini DeepAgent with execute (agent node)
+4. Self-heals on validation failure via a mini DeepAgent with edit_file + browser tools (agent node)
+5. Produces a final pass/fail report (pure function)
 
 No research node — DataEng generation starts directly from the task description.
 The generate and fix agent nodes have browser tools bound for on-demand framework
 documentation lookup (PySpark, Pandas, dbt).
 Agent nodes use create_deep_agent to get VFS (write_file, edit_file, read_file)
-and sandbox execution — artifacts are persisted to AgentCore short-term memory
-via the shared VFS.
+and sandbox execution (execute) — artifacts are persisted to AgentCore short-term
+memory via the shared VFS.
 """
 
 import json
@@ -23,6 +24,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END, StateGraph
 
 from src.graphs.state import DataEngState
+from src.graphs._utils import get_task_description
 from src.tracing.graphs import instrument_graph
 from src.tracing.utils import traced_span
 
@@ -102,20 +104,26 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None) -> str:
     return ""
 
 
-def _sample_data(state: DataEngState) -> dict[str, Any]:
-    """Plain function node: use code_interpreter to read sample records from S3 via PySpark.
+_SAMPLE_DATA_PROMPT = """\
+You are a data sampling specialist. You have access to the execute tool \
+which runs commands in the AgentCore Runtime sandbox.
 
-    Runs a PySpark script inside the code_interpreter sandbox to:
-    1. Install pyspark via install_packages()
-    2. Create a SparkSession and read up to DEFAULT_SAMPLE_SIZE records from the S3 URI
-    3. Infer schema (column names, dtypes, nullable flags) from Spark's schema inference
-    4. Return the schema as JSON
+Given the S3 URI and format below, sample up to {sample_size} records and \
+infer the schema. Run a PySpark script using the execute tool.
 
+IMPORTANT: Respond with ONLY the JSON output from the script, nothing else. \
+Do not add any commentary before or after the JSON.
+"""
+
+
+def _sample_data(state: DataEngState, model) -> dict[str, Any]:
+    """Agent node: use execute tool via DeepAgent to sample data from S3.
+
+    Creates a mini DeepAgent that runs a PySpark script in the AgentCore
+    Runtime sandbox to read sample records and infer schema.
     Falls back gracefully if S3 access fails.
     """
-    from deepagents.tools import code_interpreter
-
-    task = state.get("task_description", "")
+    task = get_task_description(state)
     s3_match = re.search(r"s3://\S+", task)
     if not s3_match:
         return {"inferred_schema": {}, "data_sample_status": "skipped"}
@@ -134,7 +142,7 @@ def _sample_data(state: DataEngState) -> dict[str, Any]:
         read_method = "parquet"
         read_opts = ""
 
-    sampling_code = (
+    sampling_script = (
         "from pyspark.sql import SparkSession\n"
         "import json\n"
         "\n"
@@ -161,17 +169,34 @@ def _sample_data(state: DataEngState) -> dict[str, Any]:
         '    print(json.dumps({"status": "failed", "error": str(e)}))\n'
     )
 
+    user_msg = (
+        f"Run the following PySpark script using the execute tool. "
+        f"First run: execute(\"pip install pyspark\")\n"
+        f"Then run the script:\n\n```python\n{sampling_script}\n```\n\n"
+        f"Respond with ONLY the JSON output line from the script."
+    )
+
     try:
-        with traced_span("tool:data_eng.sample_data", {
+        with traced_span("agent:data_eng.sample_data", {
             "agent.graph": "data_eng",
             "agent.node": "sample_data",
             "sample.s3_uri": s3_uri,
             "sample.format": read_method,
             "sample.size": DEFAULT_SAMPLE_SIZE,
         }):
-            code_interpreter.install_packages(["pyspark"])
-            result = code_interpreter.execute_code(sampling_code)
-            output = json.loads(str(result))
+            response = _run_agent(
+                _SAMPLE_DATA_PROMPT.format(sample_size=DEFAULT_SAMPLE_SIZE),
+                user_msg,
+                model,
+            )
+
+        # Try to extract JSON from the response
+        # The agent may include extra text around the JSON
+        json_match = re.search(r'\{[^{}]*"status"\s*:\s*"[^"]*"[^{}]*\}', response)
+        if json_match:
+            output = json.loads(json_match.group(0))
+        else:
+            output = json.loads(response.strip())
 
         if output.get("status") == "success":
             return {
@@ -191,7 +216,7 @@ def _sample_data(state: DataEngState) -> dict[str, Any]:
 
 def _generate(state: DataEngState, model, tools: list) -> dict[str, Any]:
     """Agent node: create_deep_agent with write_file + browser tools to generate code."""
-    task = state.get("task_description", "")
+    task = get_task_description(state)
     inferred_schema = state.get("inferred_schema", {})
 
     user_msg = f"## Task\n{task}"
@@ -230,62 +255,57 @@ def _generate(state: DataEngState, model, tools: list) -> dict[str, Any]:
     return {"code_artifacts": code_artifacts, "messages": [AIMessage(content=response)]}
 
 
-def _validate(state: DataEngState) -> dict[str, Any]:
-    """Plain function: use code_interpreter to install deps, upload files, run pytest.
+_VALIDATE_PROMPT = """\
+You are a pytest validation runner. You have access to the execute tool \
+which runs commands in the AgentCore Runtime sandbox.
 
-    Calls the code_interpreter tool directly (no LLM needed):
-    1. install_packages() for pytest + framework dependencies
-    2. upload_file() for each generated file from VFS
-    3. execute_code() to run pytest
-    Parses test output and sets validation_passed / validation_output.
+Run the following steps:
+1. execute("pip install pytest pandas pyspark")
+2. execute("python -m pytest /tests/test_transform.py -v --tb=long")
+
+Report the full pytest output. State clearly whether validation PASSED or FAILED.
+"""
+
+
+def _validate(state: DataEngState, model) -> dict[str, Any]:
+    """Agent node: use execute tool via DeepAgent to run pytest validation.
+
+    Creates a mini DeepAgent that installs deps and runs pytest in the
+    AgentCore Runtime sandbox. Parses test output and sets
+    validation_passed / validation_output.
     """
-    from deepagents.tools import code_interpreter
-
     artifacts = state.get("code_artifacts", {})
+    files_list = ", ".join(artifacts.values()) if artifacts else "unknown"
+
+    user_msg = (
+        f"## Generated Files\n{files_list}\n\n"
+        "Install dependencies and run pytest validation now."
+    )
 
     try:
-        # Step 1: Install pytest and common data framework deps
-        code_interpreter.install_packages(["pytest", "pandas", "pyspark"])
-    except Exception as exc:
-        return {
-            "validation_passed": False,
-            "validation_output": f"Failed to install packages: {exc}",
-        }
-
-    # Step 2: Upload generated files from VFS
-    for _name, vfs_path in artifacts.items():
-        try:
-            code_interpreter.upload_file(vfs_path)
-        except Exception as exc:
-            return {
-                "validation_passed": False,
-                "validation_output": f"Failed to upload {vfs_path}: {exc}",
-            }
-
-    # Step 3: Run pytest
-    try:
-        with traced_span("tool:data_eng.pytest", {
+        with traced_span("agent:data_eng.validate", {
             "agent.graph": "data_eng",
             "agent.node": "validate",
             "agent.artifact_count": len(artifacts),
         }):
-            result = code_interpreter.execute_code(
-                "import subprocess; "
-                "r = subprocess.run(['pytest', '/tests/test_transform.py', '-v'], "
-                "capture_output=True, text=True); "
-                "print(r.stdout); print(r.stderr); exit(r.returncode)"
-            )
+            response = _run_agent(_VALIDATE_PROMPT, user_msg, model)
     except Exception as exc:
-        result = str(exc)
+        response = str(exc)
 
-    output = str(result)
+    output = response
 
     # Check for explicit pytest result markers.
     # pytest output contains "X passed" and/or "X failed" — check both.
-    output_lower = output.lower()
-    has_passed = "passed" in output_lower
-    has_failed = "failed" in output_lower or "error" in output_lower
-    passed = has_passed and not has_failed
+    upper = output.upper()
+    if "VALIDATION FAILED" in upper or "VALIDATION: FAILED" in upper:
+        passed = False
+    elif "VALIDATION PASSED" in upper or "VALIDATION: PASSED" in upper:
+        passed = True
+    else:
+        output_lower = output.lower()
+        has_passed = "passed" in output_lower
+        has_failed = "failed" in output_lower or "error" in output_lower
+        passed = has_passed and not has_failed
 
     return {
         "validation_passed": passed,
@@ -295,11 +315,9 @@ def _validate(state: DataEngState) -> dict[str, Any]:
 
 def _fix(state: DataEngState, model, tools: list) -> dict[str, Any]:
     """Agent node: create_deep_agent with edit_file + browser tools to fix pytest failures."""
-    from deepagents.tools import code_interpreter
-
     attempt = state.get("attempt", 0) + 1
     error_output = state.get("validation_output", "")
-    task = state.get("task_description", "")
+    task = get_task_description(state)
     inferred_schema = state.get("inferred_schema", {})
 
     user_msg = f"## Original Task\n{task}\n\n"
@@ -321,14 +339,6 @@ def _fix(state: DataEngState, model, tools: list) -> dict[str, Any]:
         "agent.tool_count": len(tools),
     }):
         response = _run_agent(_FIX_PROMPT, user_msg, model, tools=tools)
-
-    # Re-upload corrected files to code_interpreter sandbox
-    artifacts = state.get("code_artifacts", {})
-    for _name, vfs_path in artifacts.items():
-        try:
-            code_interpreter.upload_file(vfs_path)
-        except Exception:
-            pass  # Best-effort re-upload; next validate will catch issues
 
     return {"attempt": attempt, "messages": [AIMessage(content=response)]}
 
@@ -387,13 +397,13 @@ def build_data_eng_graph(model, tools=None):
     graph = StateGraph(DataEngState)
 
     def sample_data(state: DataEngState) -> dict[str, Any]:
-        return _sample_data(state)
+        return _sample_data(state, model)
 
     def generate(state: DataEngState) -> dict[str, Any]:
         return _generate(state, model, browser_tools)
 
     def validate(state: DataEngState) -> dict[str, Any]:
-        return _validate(state)
+        return _validate(state, model)
 
     def fix(state: DataEngState) -> dict[str, Any]:
         return _fix(state, model, browser_tools)
@@ -421,9 +431,9 @@ def build_data_eng_graph(model, tools=None):
     graph.add_edge("report", END)
 
     instrument_graph(graph, "data_eng", {
-        "sample_data": "function",
+        "sample_data": "agent",
         "generate": "agent",
-        "validate": "function",
+        "validate": "agent",
         "fix": "agent",
         "report": "function",
     })

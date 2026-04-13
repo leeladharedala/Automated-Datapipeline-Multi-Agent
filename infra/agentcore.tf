@@ -36,12 +36,12 @@ resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
     # Model
     BEDROCK_MODEL_ID = var.agentcore_model_id
 
-    # Observability (OTEL / ADOT)
+    # Observability (ADOT)
     AGENT_OBSERVABILITY_ENABLED = "true"
-    OTEL_TRACES_EXPORTER        = "otlp"
     OTEL_PYTHON_DISTRO          = "aws_distro"
     OTEL_PYTHON_CONFIGURATOR    = "aws_configurator"
-    OTEL_EXPORTER_OLTP_PROTOCOL = "http/protobuf"
+    OTEL_EXPORTER_OTLP_PROTOCOL = "http/protobuf"
+    OTEL_TRACES_EXPORTER        = "otlp"
     OTEL_RESOURCE_ATTRIBUTES    = "service.name=${var.project_name}-${var.environment}"
 
     # GitHub — used by submit_pr tool to create PRs on a target repo
@@ -50,8 +50,9 @@ resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
     GITHUB_TOKEN_SECRET_ARN = var.github_token_secret_arn
   }
 
-  network_configuration {
-    network_mode = "PUBLIC"
+  lifecycle_configuration {
+    idle_runtime_session_timeout = 900   # 15 min — keep warm sessions alive
+    max_lifetime                 = 28800 # 8 hours
   }
 
   # ── ADOT Collector Sidecar ──────────────────────────────────
@@ -61,14 +62,6 @@ resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
   # The OTEL env vars above will export traces via the AgentCore
   # built-in observability. Re-add the sidecar block when the
   # provider schema supports it.
-}
-
-# ── Agent Runtime Endpoint ────────────────────────────────────
-
-resource "aws_bedrockagentcore_agent_runtime_endpoint" "orchestrator" {
-  name             = replace("${var.project_name}_${var.environment}_endpoint", "-", "_")
-  agent_runtime_id = aws_bedrockagentcore_agent_runtime.orchestrator.agent_runtime_id
-  description      = "Public endpoint for the orchestrator agent runtime"
 }
 
 # ── Agent Memory ──────────────────────────────────────────────

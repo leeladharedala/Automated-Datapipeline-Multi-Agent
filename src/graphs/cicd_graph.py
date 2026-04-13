@@ -18,6 +18,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END, StateGraph
 
 from src.graphs.state import CICDState
+from src.graphs._utils import get_task_description
 from src.tracing.graphs import instrument_graph
 from src.tracing.utils import traced_span
 
@@ -101,7 +102,7 @@ def _run_agent(system_prompt: str, user_message: str, model) -> str:
 
 def _generate(state: CICDState, model) -> dict[str, Any]:
     """Agent node: create_deep_agent with write_file to generate workflow files."""
-    task = state.get("task_description", "")
+    task = get_task_description(state)
 
     with traced_span("agent:cicd.generate", {
         "agent.graph": "cicd",
@@ -119,7 +120,7 @@ def _generate(state: CICDState, model) -> dict[str, Any]:
 
 def _validate(state: CICDState, model) -> dict[str, Any]:
     """Agent node: create_deep_agent with execute to run actionlint."""
-    task = state.get("task_description", "")
+    task = get_task_description(state)
     artifacts = state.get("workflow_artifacts", {})
     files_list = ", ".join(artifacts.values()) if artifacts else "unknown"
 
@@ -154,7 +155,7 @@ def _fix(state: CICDState, model) -> dict[str, Any]:
     """Agent node: create_deep_agent with edit_file to fix actionlint errors."""
     attempt = state.get("attempt", 0) + 1
     error_output = state.get("validation_output", "")
-    task = state.get("task_description", "")
+    task = get_task_description(state)
 
     user_msg = (
         f"## Original Task\n{task}\n\n"

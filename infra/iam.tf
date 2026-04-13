@@ -196,3 +196,23 @@ resource "aws_iam_role_policy" "xray_write" {
   role   = aws_iam_role.agentcore_execution.id
   policy = data.aws_iam_policy_document.xray_write.json
 }
+
+# ── X-Ray Indexing (Transaction Search) ───────────────────────
+
+data "aws_iam_policy_document" "xray_indexing" {
+  statement {
+    sid    = "XRayIndexing"
+    effect = "Allow"
+    actions = [
+      "xray:GetIndexingRules",
+      "xray:UpdateIndexingRule",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "xray_indexing" {
+  name   = "xray-indexing"
+  role   = aws_iam_role.agentcore_execution.id
+  policy = data.aws_iam_policy_document.xray_indexing.json
+}

@@ -21,11 +21,6 @@ output "agent_runtime_arn" {
   value       = aws_bedrockagentcore_agent_runtime.orchestrator.agent_runtime_arn
 }
 
-output "agent_runtime_endpoint" {
-  description = "AgentCore runtime endpoint ARN — used by the CopilotKit frontend proxy"
-  value       = aws_bedrockagentcore_agent_runtime_endpoint.orchestrator.agent_runtime_endpoint_arn
-}
-
 # ── Memory ────────────────────────────────────────────────────
 
 output "memory_id" {
