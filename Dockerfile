@@ -72,6 +72,7 @@ ENV PYTHONUNBUFFERED=1
 # is logged as body in every LangChain instrumentation log record, causing
 # huge OTLP payloads and potential 400s from the collector size limits.
 ENV OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=false
+ENV TRACELOOP_TRACE_CONTENT=false
 
 
 # NOTE: Do NOT add a Docker HEALTHCHECK — AgentCore manages health

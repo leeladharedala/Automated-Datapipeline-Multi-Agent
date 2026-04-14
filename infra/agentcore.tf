@@ -39,12 +39,14 @@ resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
     BEDROCK_MODEL_ID = var.agentcore_model_id
 
     # Observability (ADOT)
-    AGENT_OBSERVABILITY_ENABLED = "true"
-    OTEL_PYTHON_DISTRO          = "aws_distro"
-    OTEL_PYTHON_CONFIGURATOR    = "aws_configurator"
-    OTEL_EXPORTER_OTLP_PROTOCOL = "http/protobuf"
-    OTEL_TRACES_EXPORTER        = "otlp"
-    OTEL_RESOURCE_ATTRIBUTES    = "service.name=${var.project_name}-${var.environment}"
+    AGENT_OBSERVABILITY_ENABLED                        = "true"
+    OTEL_PYTHON_DISTRO                                 = "aws_distro"
+    OTEL_PYTHON_CONFIGURATOR                           = "aws_configurator"
+    OTEL_EXPORTER_OTLP_PROTOCOL                        = "http/protobuf"
+    OTEL_TRACES_EXPORTER                               = "otlp"
+    OTEL_RESOURCE_ATTRIBUTES                           = "service.name=${var.project_name}-${var.environment}"
+    OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = "false"
+    TRACELOOP_TRACE_CONTENT                            = "false"
 
     # GitHub — used by submit_pr tool to create PRs on a target repo
     GITHUB_REPO             = var.github_target_repo
