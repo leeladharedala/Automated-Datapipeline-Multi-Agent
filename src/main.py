@@ -12,6 +12,7 @@ from deepagents import create_deep_agent, CompiledSubAgent
 from langchain_anthropic import ChatAnthropic
 from langgraph_checkpoint_aws import AgentCoreMemorySaver
 
+from src.checkpointer import ThrottledCheckpointSaver
 from src.prompts.orchestrator_prompt import ORCHESTRATOR_PROMPT
 from src.graphs import (
     build_iac_graph,
@@ -34,7 +35,7 @@ async def build_agent():
         raise RuntimeError("AGENTCORE_MEMORY_ID environment variable is required")
 
     model = ChatAnthropic(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-4-6-20250514",
         temperature=0,
     )
 
@@ -67,8 +68,9 @@ async def build_agent():
         ),
     ]
 
-    # Short-term memory: checkpoints
-    checkpointer = AgentCoreMemorySaver(memory_id=MEMORY_ID, region_name=REGION)
+    # Short-term memory: checkpoints (throttled to reduce CreateEvent API calls)
+    remote_saver = AgentCoreMemorySaver(memory_id=MEMORY_ID, region_name=REGION)
+    checkpointer = ThrottledCheckpointSaver(remote_saver, flush_interval=5)
 
     # Pass tools directly — skip tracing wrappers to avoid
     # Pydantic v2 compatibility issues during agent compilation
