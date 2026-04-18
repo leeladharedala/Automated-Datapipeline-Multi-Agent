@@ -41,6 +41,9 @@ import deepagents; print(f'deepagents {deepagents.__version__}'); \
 import copilotkit; print('copilotkit OK'); \
 import langchain; print(f'langchain {langchain.__version__}'); \
 import langgraph; print(f'langgraph {version(\"langgraph\")}'); \
+import langgraph_checkpoint_aws; print('langgraph-checkpoint-aws OK'); \
+from langgraph_checkpoint_aws import AgentCoreMemorySaver, AgentCoreMemoryStore; print('Memory classes OK'); \
+AgentCoreMemorySaver(memory_id='test', region_name='us-west-2'); print('AgentCoreMemorySaver OK'); \
 import fastapi; print(f'fastapi {fastapi.__version__}'); \
 import bedrock_agentcore; print('bedrock-agentcore OK'); \
 from langchain_anthropic import ChatAnthropic; print('ChatAnthropic OK'); \
@@ -67,4 +70,4 @@ ENV PYTHONUNBUFFERED=1
 # checking itself by polling /ping. A Docker-level HEALTHCHECK can
 # conflict with AgentCore's container lifecycle management.
 
-CMD ["python", "src/agentcore/server.py"]
+CMD ["opentelemetry-instrument", "python", "src/agentcore/server.py"]
