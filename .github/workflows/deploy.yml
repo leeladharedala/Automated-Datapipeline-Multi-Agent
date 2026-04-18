@@ -196,8 +196,8 @@ jobs:
         run: |
           if [ -d "raw_data" ]; then
             BUCKET_NAME=$(cd infra && terraform output -raw raw_data_bucket_name)
-            aws s3 sync raw_data/ "s3://${BUCKET_NAME}/" --delete
-            echo "✅ raw_data/ synced to s3://${BUCKET_NAME}/"
+            aws s3 sync raw_data/ "s3://${BUCKET_NAME}/raw_data/" --delete
+            echo "✅ raw_data/ synced to s3://${BUCKET_NAME}/raw_data/"
           else
             echo "ℹ️ raw_data/ directory not found — skipping sync"
           fi
