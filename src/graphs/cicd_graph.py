@@ -96,7 +96,8 @@ def _run_agent(system_prompt: str, user_message: str, model) -> str:
     result = agent.invoke({"messages": [HumanMessage(content=user_message)]})
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
-            return msg.content
+            from src.graphs._utils import _content_to_str
+            return _content_to_str(msg.content)
     return ""
 
 

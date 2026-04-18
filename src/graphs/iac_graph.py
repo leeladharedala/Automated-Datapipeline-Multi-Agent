@@ -124,7 +124,8 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None) -> str:
     # Extract the last AI message
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
-            return msg.content
+            from src.graphs._utils import _content_to_str
+            return _content_to_str(msg.content)
     return ""
 
 
@@ -149,14 +150,16 @@ def _research(state: IaCState, model, tools_cache: dict) -> dict[str, Any]:
         try:
             from src.tools.gateway import load_gateway_tools
             logger.info("Lazy-loading Terraform Registry + AWS Docs MCP tools...")
+            # _research runs in a thread (LangGraph executor), so we can
+            # safely create a dedicated event loop that stays open for the
+            # lifetime of the MCP client's stdio connections.
             loop = asyncio.new_event_loop()
-            try:
-                client, active_tools = loop.run_until_complete(load_gateway_tools())
-            finally:
-                loop.close()
-            # Cache so subsequent calls reuse the same tools and client
+            client, active_tools = loop.run_until_complete(load_gateway_tools())
+            # Cache the loop alongside client+tools so it stays alive
+            # (and the MCP subprocess connections don't get destroyed)
             tools_cache["tools"] = active_tools
             tools_cache["client"] = client
+            tools_cache["loop"] = loop
             logger.info("Loaded %d MCP tools (Terraform Registry + AWS Docs)", len(active_tools))
         except Exception as exc:
             logger.warning("Failed to load MCP tools, proceeding without research: %s", exc)

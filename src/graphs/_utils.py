@@ -21,13 +21,22 @@ def get_task_description(state: dict) -> str:
     messages = state.get("messages", [])
     for msg in messages:
         if isinstance(msg, HumanMessage) and msg.content:
-            content = msg.content
-            # content can be a list of content blocks in newer LangChain
-            if isinstance(content, list):
-                return " ".join(
-                    block if isinstance(block, str) else block.get("text", "")
-                    for block in content
-                )
-            return content
+            return _content_to_str(msg.content)
 
     return ""
+
+
+def _content_to_str(content) -> str:
+    """Coerce message content to a plain string.
+
+    In newer LangChain versions, ``content`` can be a list of content
+    blocks (dicts with ``type``/``text`` keys) instead of a plain string.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            block if isinstance(block, str) else block.get("text", "")
+            for block in content
+        )
+    return str(content)
