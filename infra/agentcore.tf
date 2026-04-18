@@ -38,6 +38,7 @@ resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
     # Model
     BEDROCK_MODEL_ID = var.agentcore_model_id
 
+
     # Observability (ADOT)
     AGENT_OBSERVABILITY_ENABLED                        = "true"
     OTEL_PYTHON_DISTRO                                 = "aws_distro"
