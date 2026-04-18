@@ -41,9 +41,6 @@ import deepagents; print(f'deepagents {deepagents.__version__}'); \
 import copilotkit; print('copilotkit OK'); \
 import langchain; print(f'langchain {langchain.__version__}'); \
 import langgraph; print(f'langgraph {version(\"langgraph\")}'); \
-import langgraph_checkpoint_aws; print('langgraph-checkpoint-aws OK'); \
-from langgraph_checkpoint_aws import AgentCoreMemorySaver, AgentCoreMemoryStore; print('Memory classes OK'); \
-AgentCoreMemorySaver(memory_id='test', region_name='us-west-2'); print('AgentCoreMemorySaver OK'); \
 import fastapi; print(f'fastapi {fastapi.__version__}'); \
 import bedrock_agentcore; print('bedrock-agentcore OK'); \
 from langchain_anthropic import ChatAnthropic; print('ChatAnthropic OK'); \
@@ -57,26 +54,17 @@ print('All critical packages verified.'); \
 "
 
 COPY src/ ./src/
-COPY verify_tracing.py /tmp/verify_tracing.py
 
-# Verify tracing module imports work after src/ is copied.
-# Catches missing opentelemetry packages or broken import paths at build time.
-RUN PYTHONPATH=/app python /tmp/verify_tracing.py
 
 EXPOSE 8080
 ENV PORT=8080
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
-# Suppress verbose LangChain GenAI message content from OTel spans/logs.
-# Without this, the full conversation history (including generated Terraform/YAML)
-# is logged as body in every LangChain instrumentation log record, causing
-# huge OTLP payloads and potential 400s from the collector size limits.
-ENV OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=false
-ENV TRACELOOP_TRACE_CONTENT=false
+
 
 
 # NOTE: Do NOT add a Docker HEALTHCHECK — AgentCore manages health
 # checking itself by polling /ping. A Docker-level HEALTHCHECK can
 # conflict with AgentCore's container lifecycle management.
 
-CMD ["opentelemetry-instrument", "python", "src/agentcore/server.py"]
+CMD ["python", "src/agentcore/server.py"]
