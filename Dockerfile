@@ -34,6 +34,8 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
+RUN pip install --no-cache-dir uv
+
 # Verify critical packages are actually installed and show versions
 RUN python -c "\
 from importlib.metadata import version; \
