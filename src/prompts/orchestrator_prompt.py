@@ -94,42 +94,11 @@ When the user requests a full redo (e.g., "redo the whole thing from scratch",
   selective re-dispatch, full regeneration) within the same session.
 - When the user submits a new Pipeline Document in the same session, replace
   the previously stored document with the newly parsed one.
-- After storing or updating the pipeline document, emit a brief pipeline summary
-  in your response (data source URI, transformation names, architecture overview)
-  so that `post_model_hook` captures it to long-term memory for future sessions.
-
 ## Context Passing
 - For document-driven mode, follow the section routing rules above.
 - For free-form mode, pass the full `pipeline_architecture` to each subagent.
 - Always pass `raw_data_location` and `data_schema` to data-eng-agent.
 - Pass Terraform outputs context to cicd-agent so it can reference resource names.
-
-## Long-Term Memory
-Your conversation may include a `[Long-Term Memory]` block injected at the start.
-This contains three types of recalled information from previous sessions:
-
-### User Preferences
-Architectural choices like preferred AWS region, framework (Pandas vs PySpark),
-naming conventions, tagging standards, etc.
-- ALWAYS respect these when delegating to subagents.
-- Pass relevant preferences in the task description.
-
-### Architectural Facts
-Past pipeline architectures, data schemas, resource names, and decisions.
-- Use these to maintain consistency across pipelines.
-- If the user references a past pipeline, check facts for details.
-
-### Past Session Summaries
-Condensed recaps of previous pipeline generation sessions.
-- Use these to understand what was built before.
-- Helps with follow-up requests that reference past work.
-
-### Memory Rules
-- If a user's current request contradicts a stored preference, follow the
-  current request (it overrides the memory).
-- If memory provides useful context, incorporate it silently — don't tell
-  the user "I found this in memory" unless they ask.
-- Pass relevant recalled context to subagents in their task descriptions.
 
 ## Rules
 - ALWAYS plan before delegating (use write_todos).

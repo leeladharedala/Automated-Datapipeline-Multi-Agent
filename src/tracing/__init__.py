@@ -2,12 +2,6 @@
 
 from src.tracing.agui import wrap_agui_handler
 from src.tracing.llm import traced_llm
-from src.tracing.memory import (
-    traced_post_model_hook,
-    traced_pre_model_hook,
-    traced_store_put,
-    traced_store_search,
-)
 from src.tracing.middleware import instrument_middleware
 from src.tracing.parser import traced_classify_and_extract, traced_parse_pipeline_document
 from src.tracing.provider import get_tracer, setup_tracing, shutdown_tracing
@@ -29,9 +23,5 @@ __all__ = [
     "instrument_middleware",
     "traced_parse_pipeline_document",
     "traced_classify_and_extract",
-    "traced_pre_model_hook",
-    "traced_post_model_hook",
-    "traced_store_search",
-    "traced_store_put",
     "traced_retry_loop",
 ]

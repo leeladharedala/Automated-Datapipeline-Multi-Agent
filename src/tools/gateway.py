@@ -18,11 +18,11 @@ TERRAFORM_MCP_ARGS = os.environ.get(
 ).split()
 
 AWS_DOCS_MCP_COMMAND = os.environ.get(
-    "AWS_DOCS_MCP_COMMAND", "python"
+    "AWS_DOCS_MCP_COMMAND", "uvx"
 )
 AWS_DOCS_MCP_ARGS = os.environ.get(
     "AWS_DOCS_MCP_ARGS",
-    "-m awslabs.aws_documentation_mcp_server",
+    "awslabs.aws-documentation-mcp-server@latest",
 ).split()
 
 

@@ -2,8 +2,7 @@
 Multi-Agent Data Pipeline — Entry Point
 
 Creates the root orchestrator agent using DeepAgents, backed by
-AgentCore Memory for both short-term (checkpoint) and long-term
-(preferences/facts) persistence.
+AgentCore Memory for short-term checkpoint persistence.
 """
 
 import logging
@@ -11,7 +10,7 @@ import os
 
 from deepagents import create_deep_agent, CompiledSubAgent
 from langchain_anthropic import ChatAnthropic
-from langgraph_checkpoint_aws import AgentCoreMemorySaver, AgentCoreMemoryStore
+from langgraph_checkpoint_aws import AgentCoreMemorySaver
 
 from src.prompts.orchestrator_prompt import ORCHESTRATOR_PROMPT
 from src.graphs import (
@@ -71,9 +70,6 @@ async def build_agent():
     # Short-term memory: checkpoints
     checkpointer = AgentCoreMemorySaver(memory_id=MEMORY_ID, region_name=REGION)
 
-    # Long-term memory: preferences and facts
-    store = AgentCoreMemoryStore(memory_id=MEMORY_ID, region_name=REGION)
-
     # Pass tools directly — skip tracing wrappers to avoid
     # Pydantic v2 compatibility issues during agent compilation
     agent = create_deep_agent(
@@ -82,7 +78,6 @@ async def build_agent():
         subagents=subagents,
         tools=[submit_pr, parse_document_tool],
         checkpointer=checkpointer,
-        store=store,
     )
 
     return agent
