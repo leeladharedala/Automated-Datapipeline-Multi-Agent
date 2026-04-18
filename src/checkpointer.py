@@ -120,7 +120,6 @@ class ThrottledCheckpointSaver(BaseCheckpointSaver):
         config: RunnableConfig,
         writes: Sequence[tuple[str, Any]],
         task_id: str,
-        *,
         task_path: str = "",
     ) -> None:
         # Intermediate writes are only needed for durable execution
@@ -130,7 +129,7 @@ class ThrottledCheckpointSaver(BaseCheckpointSaver):
         count = self._write_counts.get(thread_id, 0)
         if count == 0:
             # Only persist writes right after a flush (state is in sync)
-            self._remote.put_writes(config, writes, task_id, task_path=task_path)
+            self._remote.put_writes(config, writes, task_id, task_path)
 
     # ── async read methods (delegate to remote) ──────────────
 
@@ -173,10 +172,9 @@ class ThrottledCheckpointSaver(BaseCheckpointSaver):
         config: RunnableConfig,
         writes: Sequence[tuple[str, Any]],
         task_id: str,
-        *,
         task_path: str = "",
     ) -> None:
         thread_id = self._thread_id(config)
         count = self._write_counts.get(thread_id, 0)
         if count == 0:
-            await self._remote.aput_writes(config, writes, task_id, task_path=task_path)
+            await self._remote.aput_writes(config, writes, task_id, task_path)
