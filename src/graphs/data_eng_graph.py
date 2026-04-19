@@ -84,19 +84,24 @@ You will receive the pytest failure output. Your job:
 """
 
 
-def _run_agent(system_prompt: str, user_message: str, model, tools=None) -> str:
+def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend=None) -> str:
     """Create a mini DeepAgent, invoke it, and return the final AI message text.
 
     Extra tools (e.g. browser tools) are passed on top of the built-in
     DeepAgent tool stack (write_file, edit_file, read_file, execute, etc.).
+    Pass a backend (e.g. AgentCoreSandbox) to enable the execute tool.
     """
     from deepagents import create_deep_agent
 
-    agent = create_deep_agent(
+    kwargs = dict(
         model=model,
         system_prompt=system_prompt,
         tools=tools or [],
     )
+    if backend is not None:
+        kwargs["backend"] = backend
+
+    agent = create_deep_agent(**kwargs)
     result = agent.invoke({"messages": [HumanMessage(content=user_message)]})
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
@@ -120,7 +125,7 @@ Do not add any commentary before or after the JSON.
 def _sample_data(state: DataEngState, model) -> dict[str, Any]:
     """Agent node: use execute tool via DeepAgent to sample data from S3.
 
-    Creates a mini DeepAgent that runs a PySpark script in the AgentCore
+    Creates a mini DeepAgent that runs a pandas script in the AgentCore
     Runtime sandbox to read sample records and infer schema.
     Falls back gracefully if S3 access fails.
     """
@@ -134,46 +139,36 @@ def _sample_data(state: DataEngState, model) -> dict[str, Any]:
     # Auto-detect format from task description
     task_lower = task.lower()
     if "csv" in task_lower:
-        read_method = "csv"
-        read_opts = '.option("header", "true").option("inferSchema", "true")'
+        read_call = f'pd.read_csv("{s3_uri}", nrows={DEFAULT_SAMPLE_SIZE})'
     elif "json" in task_lower:
-        read_method = "json"
-        read_opts = ""
+        read_call = f'pd.read_json("{s3_uri}", lines=True, nrows={DEFAULT_SAMPLE_SIZE})'
     else:
-        read_method = "parquet"
-        read_opts = ""
+        read_call = f'pd.read_parquet("{s3_uri}").head({DEFAULT_SAMPLE_SIZE})'
+
+    fmt = "csv" if "csv" in task_lower else ("json" if "json" in task_lower else "parquet")
 
     sampling_script = (
-        "from pyspark.sql import SparkSession\n"
+        "import pandas as pd\n"
         "import json\n"
         "\n"
         "try:\n"
-        '    spark = SparkSession.builder \\\n'
-        '        .appName("data_sampling") \\\n'
-        '        .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \\\n'
-        "        .getOrCreate()\n"
-        "\n"
-        f'    df = spark.read.format("{read_method}"){read_opts}.load("{s3_uri}").limit({DEFAULT_SAMPLE_SIZE})\n'
-        "\n"
+        f"    df = {read_call}\n"
         "    schema = []\n"
-        "    for field in df.schema.fields:\n"
+        "    for col in df.columns:\n"
         "        schema.append({\n"
-        '            "name": field.name,\n'
-        '            "type": str(field.dataType),\n'
-        '            "nullable": field.nullable,\n'
+        '            "name": col,\n'
+        '            "type": str(df[col].dtype),\n'
+        '            "nullable": bool(df[col].isnull().any()),\n'
         "        })\n"
-        "\n"
-        "    row_count = df.count()\n"
+        "    row_count = len(df)\n"
         '    print(json.dumps({"status": "success", "columns": schema, "row_count": row_count}))\n'
-        "    spark.stop()\n"
         "except Exception as e:\n"
         '    print(json.dumps({"status": "failed", "error": str(e)}))\n'
     )
 
     user_msg = (
-        f"Run the following PySpark script using the execute tool. "
-        f"First run: execute(\"pip install pyspark\")\n"
-        f"Then run the script:\n\n```python\n{sampling_script}\n```\n\n"
+        f"Run the following Python script using the execute tool.\n\n"
+        f"```python\n{sampling_script}\n```\n\n"
         f"Respond with ONLY the JSON output line from the script."
     )
 
@@ -182,7 +177,7 @@ def _sample_data(state: DataEngState, model) -> dict[str, Any]:
             "agent.graph": "data_eng",
             "agent.node": "sample_data",
             "sample.s3_uri": s3_uri,
-            "sample.format": read_method,
+            "sample.format": fmt,
             "sample.size": DEFAULT_SAMPLE_SIZE,
         }):
             response = _run_agent(
@@ -192,7 +187,6 @@ def _sample_data(state: DataEngState, model) -> dict[str, Any]:
             )
 
         # Try to extract JSON from the response
-        # The agent may include extra text around the JSON
         json_match = re.search(r'\{[^{}]*"status"\s*:\s*"[^"]*"[^{}]*\}', response)
         if json_match:
             output = json.loads(json_match.group(0))
@@ -268,12 +262,11 @@ Report the full pytest output. State clearly whether validation PASSED or FAILED
 """
 
 
-def _validate(state: DataEngState, model) -> dict[str, Any]:
+def _validate(state: DataEngState, model, sandbox=None) -> dict[str, Any]:
     """Agent node: use execute tool via DeepAgent to run pytest validation.
 
     Creates a mini DeepAgent that installs deps and runs pytest in the
-    AgentCore Runtime sandbox. Parses test output and sets
-    validation_passed / validation_output.
+    AgentCore Code Interpreter sandbox.
     """
     artifacts = state.get("code_artifacts", {})
     files_list = ", ".join(artifacts.values()) if artifacts else "unknown"
@@ -289,7 +282,7 @@ def _validate(state: DataEngState, model) -> dict[str, Any]:
             "agent.node": "validate",
             "agent.artifact_count": len(artifacts),
         }):
-            response = _run_agent(_VALIDATE_PROMPT, user_msg, model)
+            response = _run_agent(_VALIDATE_PROMPT, user_msg, model, backend=sandbox)
     except Exception as exc:
         response = str(exc)
 
@@ -314,7 +307,7 @@ def _validate(state: DataEngState, model) -> dict[str, Any]:
     }
 
 
-def _fix(state: DataEngState, model, tools: list) -> dict[str, Any]:
+def _fix(state: DataEngState, model, tools: list, sandbox=None) -> dict[str, Any]:
     """Agent node: create_deep_agent with edit_file + browser tools to fix pytest failures."""
     attempt = state.get("attempt", 0) + 1
     error_output = state.get("validation_output", "")
@@ -339,7 +332,7 @@ def _fix(state: DataEngState, model, tools: list) -> dict[str, Any]:
         "agent.attempt": attempt,
         "agent.tool_count": len(tools),
     }):
-        response = _run_agent(_FIX_PROMPT, user_msg, model, tools=tools)
+        response = _run_agent(_FIX_PROMPT, user_msg, model, tools=tools, backend=sandbox)
 
     return {"attempt": attempt, "messages": [AIMessage(content=response)]}
 
@@ -395,6 +388,10 @@ def build_data_eng_graph(model, tools=None):
     """
     browser_tools = tools or []
 
+    # Load Code Interpreter sandbox for validate/fix nodes
+    from src.sandbox import get_sandbox_backend
+    sandbox = get_sandbox_backend()
+
     graph = StateGraph(DataEngState)
 
     def sample_data(state: DataEngState) -> dict[str, Any]:
@@ -404,10 +401,10 @@ def build_data_eng_graph(model, tools=None):
         return _generate(state, model, browser_tools)
 
     def validate(state: DataEngState) -> dict[str, Any]:
-        return _validate(state, model)
+        return _validate(state, model, sandbox=sandbox)
 
     def fix(state: DataEngState) -> dict[str, Any]:
-        return _fix(state, model, browser_tools)
+        return _fix(state, model, browser_tools, sandbox=sandbox)
 
     def report(state: DataEngState) -> dict[str, Any]:
         return _report(state)

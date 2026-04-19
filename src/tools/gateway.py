@@ -57,10 +57,6 @@ async def load_gateway_tools() -> tuple["MultiServerMCPClient", list]:
     reference alive for the lifetime of tool usage — the MCP stdio
     processes are tied to the client.
 
-    As of langchain-mcp-adapters 0.1.0, MultiServerMCPClient is no
-    longer used as an async context manager. Instead, call
-    ``await client.get_tools()`` directly.
-
     Returns:
         A tuple of (MultiServerMCPClient, list of LangChain-compatible tools).
     """

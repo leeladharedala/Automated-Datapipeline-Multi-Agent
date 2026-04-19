@@ -19,6 +19,8 @@ boto3>=1.42.0
 # AgentCore Runtime SDK
 bedrock-agentcore>=1.0.0
 
+langchain-agentcore-codeinterpreter>=0.1.0
+
 # Web ser
 fastapi>=0.115.0
 uvicorn>=0.34.0
@@ -28,6 +30,9 @@ PyGithub>=2.9.0
 
 # YAML parsing
 pyyaml>=6.0
+
+pandas>=2.2.0
+pyarrow>=15.0.0
 
 aws-opentelemetry-distro==0.16.0
 opentelemetry-instrumentation-langchain

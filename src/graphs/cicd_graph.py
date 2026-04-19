@@ -85,14 +85,15 @@ You will receive the actionlint error output. Your job:
 """
 
 
-def _run_agent(system_prompt: str, user_message: str, model) -> str:
+def _run_agent(system_prompt: str, user_message: str, model, backend=None) -> str:
     """Create a mini DeepAgent, invoke it, and return the final AI message text."""
     from deepagents import create_deep_agent
 
-    agent = create_deep_agent(
-        model=model,
-        system_prompt=system_prompt,
-    )
+    kwargs = dict(model=model, system_prompt=system_prompt)
+    if backend is not None:
+        kwargs["backend"] = backend
+
+    agent = create_deep_agent(**kwargs)
     result = agent.invoke({"messages": [HumanMessage(content=user_message)]})
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
@@ -119,7 +120,7 @@ def _generate(state: CICDState, model) -> dict[str, Any]:
     return {"workflow_artifacts": workflow_artifacts, "messages": [AIMessage(content=response)]}
 
 
-def _validate(state: CICDState, model) -> dict[str, Any]:
+def _validate(state: CICDState, model, sandbox=None) -> dict[str, Any]:
     """Agent node: create_deep_agent with execute to run actionlint."""
     task = get_task_description(state)
     artifacts = state.get("workflow_artifacts", {})
@@ -135,7 +136,7 @@ def _validate(state: CICDState, model) -> dict[str, Any]:
         "agent.node": "validate",
         "agent.role": "validator",
     }):
-        response = _run_agent(_VALIDATE_PROMPT, user_msg, model)
+        response = _run_agent(_VALIDATE_PROMPT, user_msg, model, backend=sandbox)
 
     # Check for explicit PASSED/FAILED keywords from the prompt.
     # Avoid matching generic "success" which can appear in failure context.
@@ -152,7 +153,7 @@ def _validate(state: CICDState, model) -> dict[str, Any]:
     }
 
 
-def _fix(state: CICDState, model) -> dict[str, Any]:
+def _fix(state: CICDState, model, sandbox=None) -> dict[str, Any]:
     """Agent node: create_deep_agent with edit_file to fix actionlint errors."""
     attempt = state.get("attempt", 0) + 1
     error_output = state.get("validation_output", "")
@@ -169,7 +170,7 @@ def _fix(state: CICDState, model) -> dict[str, Any]:
         "agent.role": "debugger",
         "agent.attempt": attempt,
     }):
-        response = _run_agent(_FIX_PROMPT, user_msg, model)
+        response = _run_agent(_FIX_PROMPT, user_msg, model, backend=sandbox)
 
     return {"attempt": attempt, "messages": [AIMessage(content=response)]}
 
@@ -224,14 +225,19 @@ def build_cicd_graph(model):
     """
     graph = StateGraph(CICDState)
 
+    # Load local shell backend for validate/fix nodes (terraform + actionlint
+    # are pre-installed in the container)
+    from src.sandbox import get_local_shell_backend
+    sandbox = get_local_shell_backend()
+
     def generate(state: CICDState) -> dict[str, Any]:
         return _generate(state, model)
 
     def validate(state: CICDState) -> dict[str, Any]:
-        return _validate(state, model)
+        return _validate(state, model, sandbox=sandbox)
 
     def fix(state: CICDState) -> dict[str, Any]:
-        return _fix(state, model)
+        return _fix(state, model, sandbox=sandbox)
 
     def report(state: CICDState) -> dict[str, Any]:
         return _report(state)

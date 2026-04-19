@@ -106,20 +106,25 @@ You will receive the validation error output. Your job:
 """
 
 
-def _run_agent(system_prompt: str, user_message: str, model, tools=None) -> str:
+def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend=None) -> str:
     """Create a mini DeepAgent, invoke it, and return the final AI message text.
 
     This gives the agent access to the full DeepAgent tool stack:
     write_file, edit_file, read_file, execute, ls, glob, grep.
     Tools passed via the `tools` parameter are added on top.
+    Pass a backend (e.g. AgentCoreSandbox) to enable the execute tool.
     """
     from deepagents import create_deep_agent
 
-    agent = create_deep_agent(
+    kwargs = dict(
         model=model,
         system_prompt=system_prompt,
         tools=tools or [],
     )
+    if backend is not None:
+        kwargs["backend"] = backend
+
+    agent = create_deep_agent(**kwargs)
     result = agent.invoke({"messages": [HumanMessage(content=user_message)]})
     # Extract the last AI message
     for msg in reversed(result["messages"]):
@@ -149,14 +154,23 @@ def _research(state: IaCState, model, tools_cache: dict) -> dict[str, Any]:
     if not active_tools:
         try:
             from src.tools.gateway import load_gateway_tools
+            import threading
             logger.info("Lazy-loading Terraform Registry + AWS Docs MCP tools...")
-            # _research runs in a thread (LangGraph executor), so we can
-            # safely create a dedicated event loop that stays open for the
-            # lifetime of the MCP client's stdio connections.
+            # MCP stdio clients need a running event loop for the lifetime
+            # of the subprocess connections.  Spin up a dedicated loop in a
+            # background daemon thread and load tools on it.
             loop = asyncio.new_event_loop()
-            client, active_tools = loop.run_until_complete(load_gateway_tools())
-            # Cache the loop alongside client+tools so it stays alive
-            # (and the MCP subprocess connections don't get destroyed)
+
+            def _run_loop():
+                asyncio.set_event_loop(loop)
+                loop.run_forever()
+
+            t = threading.Thread(target=_run_loop, daemon=True)
+            t.start()
+
+            future = asyncio.run_coroutine_threadsafe(load_gateway_tools(), loop)
+            client, active_tools = future.result(timeout=120)
+
             tools_cache["tools"] = active_tools
             tools_cache["client"] = client
             tools_cache["loop"] = loop
@@ -207,7 +221,7 @@ def _generate(state: IaCState, model) -> dict[str, Any]:
     return {"tf_artifacts": tf_artifacts, "messages": [AIMessage(content=response)]}
 
 
-def _validate(state: IaCState, model) -> dict[str, Any]:
+def _validate(state: IaCState, model, sandbox=None) -> dict[str, Any]:
     """Agent node: create_deep_agent with execute to run terraform validate."""
     task = get_task_description(state)
     research = state.get("research_context", "")
@@ -225,7 +239,7 @@ def _validate(state: IaCState, model) -> dict[str, Any]:
         "agent.node": "validate",
         "agent.role": "validator",
     }):
-        response = _run_agent(_VALIDATE_PROMPT, user_msg, model)
+        response = _run_agent(_VALIDATE_PROMPT, user_msg, model, backend=sandbox)
 
     # Check for explicit PASSED/FAILED keywords from the prompt.
     # Avoid matching generic "success" which can appear in failure context.
@@ -243,7 +257,7 @@ def _validate(state: IaCState, model) -> dict[str, Any]:
     }
 
 
-def _fix(state: IaCState, model) -> dict[str, Any]:
+def _fix(state: IaCState, model, sandbox=None) -> dict[str, Any]:
     """Agent node: create_deep_agent with edit_file to fix broken Terraform files."""
     attempt = state.get("attempt", 0) + 1
     error_output = state.get("validation_output", "")
@@ -260,7 +274,7 @@ def _fix(state: IaCState, model) -> dict[str, Any]:
         "agent.role": "debugger",
         "agent.attempt": attempt,
     }):
-        response = _run_agent(_FIX_PROMPT, user_msg, model)
+        response = _run_agent(_FIX_PROMPT, user_msg, model, backend=sandbox)
 
     return {"attempt": attempt, "messages": [AIMessage(content=response)]}
 
@@ -320,6 +334,10 @@ def build_iac_graph(model, tools=None):
     # Cache for lazily-loaded MCP tools (loaded once on first research call)
     _cached_tools: dict[str, Any] = {"tools": tools or [], "client": None}
 
+    # Load Code Interpreter sandbox for validate/fix nodes
+    from src.sandbox import get_local_shell_backend
+    sandbox = get_local_shell_backend()
+
     def research(state: IaCState) -> dict[str, Any]:
         return _research(state, model, _cached_tools)
 
@@ -327,10 +345,10 @@ def build_iac_graph(model, tools=None):
         return _generate(state, model)
 
     def validate(state: IaCState) -> dict[str, Any]:
-        return _validate(state, model)
+        return _validate(state, model, sandbox=sandbox)
 
     def fix(state: IaCState) -> dict[str, Any]:
-        return _fix(state, model)
+        return _fix(state, model, sandbox=sandbox)
 
     def report(state: IaCState) -> dict[str, Any]:
         return _report(state)
