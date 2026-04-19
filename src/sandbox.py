@@ -1,63 +1,78 @@
-"""AgentCore Code Interpreter sandbox and local shell backends for subagent validation.
+"""Sandbox backends for subagent validation nodes.
 
-- Code Interpreter (MicroVM): Used by data-eng for pytest/pyspark validation.
+- Code Interpreter toolkit (langchain-aws): Used by data-eng for pytest/pyspark
+  validation in an isolated MicroVM. Provides execute_code, install_packages, etc.
 - LocalShellBackend: Used by IaC and CI/CD for terraform/actionlint which
   are pre-installed in the AgentCore Runtime container.
 """
 
+import asyncio
 import logging
 import os
+import threading
 
-from bedrock_agentcore.tools.code_interpreter_client import CodeInterpreter
-from langchain_agentcore_codeinterpreter import AgentCoreSandbox
 from deepagents.backends import LocalShellBackend
 
 logger = logging.getLogger(__name__)
 
 REGION = os.environ.get("AWS_REGION", "us-west-2")
-CODE_INTERPRETER_ID = os.environ.get("AGENTCORE_CODE_INTERPRETER_ID", "")
 
 # Module-level caches
-_sandbox_cache: dict = {}
+_code_interpreter_cache: dict = {}
 _local_shell_cache: dict = {}
 
 
-def get_sandbox_backend() -> AgentCoreSandbox | None:
-    """Get or create a shared AgentCoreSandbox backend (Code Interpreter).
+def get_code_interpreter_tools() -> list:
+    """Get or create Code Interpreter tools for data-eng validation.
 
-    Used by data-eng validate/fix nodes for pytest + pyspark.
-    Returns None if CODE_INTERPRETER_ID is not configured.
+    Uses langchain-aws's create_code_interpreter_toolkit which provides
+    execute_code, install_packages, write_files, etc. as LangChain tools.
+
+    Pre-installs pytest, pandas, pyspark on first call so validate nodes
+    don't waste time installing on every invocation.
+
+    Returns an empty list if setup fails (callers fall back gracefully).
     """
-    if not CODE_INTERPRETER_ID:
-        logger.warning("AGENTCORE_CODE_INTERPRETER_ID not set, sandbox unavailable")
-        return None
-
-    if "backend" in _sandbox_cache:
-        return _sandbox_cache["backend"]
+    if "tools" in _code_interpreter_cache:
+        return _code_interpreter_cache["tools"]
 
     try:
-        interpreter = CodeInterpreter(region=REGION)
-        interpreter.start(identifier=CODE_INTERPRETER_ID)
+        from langchain_aws.tools import create_code_interpreter_toolkit
 
-        # Pre-install validation dependencies so validate/fix nodes
-        # don't waste time installing on every invocation.
-        logger.info("Pre-installing sandbox dependencies...")
-        interpreter.install_packages([
-            "pytest",
-            "pandas",
-            "pyspark",
-            "pyyaml",
-        ])
-        logger.info("Sandbox dependencies installed")
+        # create_code_interpreter_toolkit is async, run it in a
+        # background loop since graph builders are sync.
+        loop = asyncio.new_event_loop()
 
-        backend = AgentCoreSandbox(interpreter=interpreter)
-        _sandbox_cache["backend"] = backend
-        _sandbox_cache["interpreter"] = interpreter
-        logger.info("Code Interpreter sandbox started: %s", CODE_INTERPRETER_ID)
-        return backend
+        def _run():
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+
+        async def _setup():
+            toolkit, tools = await create_code_interpreter_toolkit(region=REGION)
+            # Pre-install validation dependencies
+            logger.info("Pre-installing sandbox dependencies...")
+            tools_by_name = toolkit.get_tools_by_name()
+            tools_by_name["install_packages"].invoke({
+                "packages": ["pytest", "pandas", "pyspark", "pyyaml"],
+                "upgrade": False,
+            })
+            logger.info("Sandbox dependencies installed")
+            return toolkit, tools
+
+        future = asyncio.run_coroutine_threadsafe(_setup(), loop)
+        toolkit, tools = future.result(timeout=180)
+
+        _code_interpreter_cache["tools"] = tools
+        _code_interpreter_cache["toolkit"] = toolkit
+        _code_interpreter_cache["loop"] = loop
+        logger.info("Code Interpreter toolkit ready with %d tools", len(tools))
+        return tools
     except Exception as exc:
-        logger.warning("Failed to start Code Interpreter sandbox: %s", exc)
-        return None
+        logger.warning("Failed to create Code Interpreter toolkit: %s", exc)
+        return []
 
 
 def get_local_shell_backend() -> LocalShellBackend:

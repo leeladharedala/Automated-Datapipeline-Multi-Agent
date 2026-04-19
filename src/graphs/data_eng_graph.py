@@ -262,18 +262,18 @@ Report the full pytest output. State clearly whether validation PASSED or FAILED
 """
 
 
-def _validate(state: DataEngState, model, sandbox=None) -> dict[str, Any]:
-    """Agent node: use execute tool via DeepAgent to run pytest validation.
+def _validate(state: DataEngState, model, ci_tools=None) -> dict[str, Any]:
+    """Agent node: use Code Interpreter tools to run pytest validation.
 
-    Creates a mini DeepAgent that installs deps and runs pytest in the
-    AgentCore Code Interpreter sandbox.
+    Uses execute_code/execute_command from the Code Interpreter toolkit
+    to run pytest in an isolated MicroVM sandbox.
     """
     artifacts = state.get("code_artifacts", {})
     files_list = ", ".join(artifacts.values()) if artifacts else "unknown"
 
     user_msg = (
         f"## Generated Files\n{files_list}\n\n"
-        "Install dependencies and run pytest validation now."
+        "Run pytest validation now."
     )
 
     try:
@@ -282,7 +282,7 @@ def _validate(state: DataEngState, model, sandbox=None) -> dict[str, Any]:
             "agent.node": "validate",
             "agent.artifact_count": len(artifacts),
         }):
-            response = _run_agent(_VALIDATE_PROMPT, user_msg, model, backend=sandbox)
+            response = _run_agent(_VALIDATE_PROMPT, user_msg, model, tools=ci_tools)
     except Exception as exc:
         response = str(exc)
 
@@ -307,8 +307,8 @@ def _validate(state: DataEngState, model, sandbox=None) -> dict[str, Any]:
     }
 
 
-def _fix(state: DataEngState, model, tools: list, sandbox=None) -> dict[str, Any]:
-    """Agent node: create_deep_agent with edit_file + browser tools to fix pytest failures."""
+def _fix(state: DataEngState, model, tools: list) -> dict[str, Any]:
+    """Agent node: fix pytest failures using Code Interpreter + browser tools."""
     attempt = state.get("attempt", 0) + 1
     error_output = state.get("validation_output", "")
     task = get_task_description(state)
@@ -332,7 +332,7 @@ def _fix(state: DataEngState, model, tools: list, sandbox=None) -> dict[str, Any
         "agent.attempt": attempt,
         "agent.tool_count": len(tools),
     }):
-        response = _run_agent(_FIX_PROMPT, user_msg, model, tools=tools, backend=sandbox)
+        response = _run_agent(_FIX_PROMPT, user_msg, model, tools=tools)
 
     return {"attempt": attempt, "messages": [AIMessage(content=response)]}
 
@@ -388,9 +388,10 @@ def build_data_eng_graph(model, tools=None):
     """
     browser_tools = tools or []
 
-    # Load Code Interpreter sandbox for validate/fix nodes
-    from src.sandbox import get_sandbox_backend
-    sandbox = get_sandbox_backend()
+    # Load Code Interpreter tools for validate/fix nodes (execute_code,
+    # install_packages, write_files, etc.)
+    from src.sandbox import get_code_interpreter_tools
+    ci_tools = get_code_interpreter_tools()
 
     graph = StateGraph(DataEngState)
 
@@ -401,10 +402,10 @@ def build_data_eng_graph(model, tools=None):
         return _generate(state, model, browser_tools)
 
     def validate(state: DataEngState) -> dict[str, Any]:
-        return _validate(state, model, sandbox=sandbox)
+        return _validate(state, model, ci_tools=ci_tools)
 
     def fix(state: DataEngState) -> dict[str, Any]:
-        return _fix(state, model, browser_tools, sandbox=sandbox)
+        return _fix(state, model, browser_tools + ci_tools)
 
     def report(state: DataEngState) -> dict[str, Any]:
         return _report(state)
