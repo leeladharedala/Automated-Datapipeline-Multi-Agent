@@ -169,10 +169,10 @@ def _research(state: IaCState, model, tools_cache: dict) -> dict[str, Any]:
             t.start()
 
             future = asyncio.run_coroutine_threadsafe(load_gateway_tools(), loop)
-            client, active_tools = future.result(timeout=120)
+            clients, active_tools = future.result(timeout=120)
 
             tools_cache["tools"] = active_tools
-            tools_cache["client"] = client
+            tools_cache["clients"] = clients
             tools_cache["loop"] = loop
             logger.info("Loaded %d MCP tools (Terraform Registry + AWS Docs)", len(active_tools))
         except Exception as exc:

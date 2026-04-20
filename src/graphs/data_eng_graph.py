@@ -122,7 +122,7 @@ Do not add any commentary before or after the JSON.
 """
 
 
-def _sample_data(state: DataEngState, model) -> dict[str, Any]:
+def _sample_data(state: DataEngState, model, ci_tools=None) -> dict[str, Any]:
     """Agent node: use execute tool via DeepAgent to sample data from S3.
 
     Creates a mini DeepAgent that runs a pandas script in the AgentCore
@@ -184,6 +184,7 @@ def _sample_data(state: DataEngState, model) -> dict[str, Any]:
                 _SAMPLE_DATA_PROMPT.format(sample_size=DEFAULT_SAMPLE_SIZE),
                 user_msg,
                 model,
+                tools=ci_tools,
             )
 
         # Try to extract JSON from the response
@@ -396,7 +397,7 @@ def build_data_eng_graph(model, tools=None):
     graph = StateGraph(DataEngState)
 
     def sample_data(state: DataEngState) -> dict[str, Any]:
-        return _sample_data(state, model)
+        return _sample_data(state, model, ci_tools=ci_tools)
 
     def generate(state: DataEngState) -> dict[str, Any]:
         return _generate(state, model, browser_tools)
