@@ -122,11 +122,12 @@ Do not add any commentary before or after the JSON.
 """
 
 
-def _sample_data(state: DataEngState, model, ci_tools=None) -> dict[str, Any]:
+def _sample_data(state: DataEngState, model, backend=None) -> dict[str, Any]:
     """Agent node: use execute tool via DeepAgent to sample data from S3.
 
-    Creates a mini DeepAgent that runs a pandas script in the AgentCore
-    Runtime sandbox to read sample records and infer schema.
+    Creates a mini DeepAgent that runs a pandas script using the
+    LocalShellBackend (same as IaC/CI-CD validation). This runs directly
+    in the container where IAM role credentials are available for S3 access.
     Falls back gracefully if S3 access fails.
     """
     task = get_task_description(state)
@@ -139,13 +140,14 @@ def _sample_data(state: DataEngState, model, ci_tools=None) -> dict[str, Any]:
     # Auto-detect format from task description
     task_lower = task.lower()
     if "csv" in task_lower:
+        fmt = "csv"
         read_call = f'pd.read_csv("{s3_uri}", nrows={DEFAULT_SAMPLE_SIZE})'
     elif "json" in task_lower:
+        fmt = "json"
         read_call = f'pd.read_json("{s3_uri}", lines=True, nrows={DEFAULT_SAMPLE_SIZE})'
     else:
+        fmt = "parquet"
         read_call = f'pd.read_parquet("{s3_uri}").head({DEFAULT_SAMPLE_SIZE})'
-
-    fmt = "csv" if "csv" in task_lower else ("json" if "json" in task_lower else "parquet")
 
     sampling_script = (
         "import pandas as pd\n"
@@ -184,7 +186,7 @@ def _sample_data(state: DataEngState, model, ci_tools=None) -> dict[str, Any]:
                 _SAMPLE_DATA_PROMPT.format(sample_size=DEFAULT_SAMPLE_SIZE),
                 user_msg,
                 model,
-                tools=ci_tools,
+                backend=backend,
             )
 
         # Try to extract JSON from the response
@@ -391,13 +393,14 @@ def build_data_eng_graph(model, tools=None):
 
     # Load Code Interpreter tools for validate/fix nodes (execute_code,
     # install_packages, write_files, etc.)
-    from src.sandbox import get_code_interpreter_tools
+    from src.sandbox import get_code_interpreter_tools, get_local_shell_backend
     ci_tools = get_code_interpreter_tools()
+    sandbox = get_local_shell_backend()
 
     graph = StateGraph(DataEngState)
 
     def sample_data(state: DataEngState) -> dict[str, Any]:
-        return _sample_data(state, model, ci_tools=ci_tools)
+        return _sample_data(state, model, backend=sandbox)
 
     def generate(state: DataEngState) -> dict[str, Any]:
         return _generate(state, model, browser_tools)

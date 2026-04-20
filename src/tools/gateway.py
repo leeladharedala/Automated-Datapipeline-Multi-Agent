@@ -21,7 +21,7 @@ TERRAFORM_MCP_COMMAND = os.environ.get(
     "TERRAFORM_MCP_COMMAND", "npx"
 )
 TERRAFORM_MCP_ARGS = os.environ.get(
-    "TERRAFORM_MCP_ARGS", "@hashicorp/terraform-mcp-server"
+    "TERRAFORM_MCP_ARGS", "terraform-mcp-server"
 ).split()
 
 AWS_DOCS_MCP_COMMAND = os.environ.get(

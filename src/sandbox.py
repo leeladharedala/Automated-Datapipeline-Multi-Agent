@@ -56,7 +56,7 @@ def get_code_interpreter_tools() -> list:
             logger.info("Pre-installing sandbox dependencies...")
             tools_by_name = toolkit.get_tools_by_name()
             tools_by_name["install_packages"].invoke({
-                "packages": ["pytest", "pandas", "pyspark", "pyyaml"],
+                "packages": ["pytest", "pandas", "pyspark", "pyyaml", "s3fs", "fsspec"],
                 "upgrade": False,
             })
             logger.info("Sandbox dependencies installed")

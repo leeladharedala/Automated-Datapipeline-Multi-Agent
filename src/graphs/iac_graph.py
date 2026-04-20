@@ -75,23 +75,29 @@ Rules:
 """
 
 _VALIDATE_PROMPT = """\
-You are a Terraform validation runner. You have access to the execute tool \
+You are a Terraform plan reviewer. You have access to the execute tool \
 which runs commands in the AgentCore Runtime sandbox (terraform is pre-installed).
 
-Given the task description below, verify that the generated Terraform code fully \
-implements the requested architectural design and is logically/syntactically valid.
+Given the task description and research context below, verify that the generated \
+Terraform code creates the correct resources as per the requested architecture.
 
 Run these steps:
 1. execute("cd /infra && terraform init -backend=false")
-2. execute("cd /infra && terraform validate")
-3. execute("cd /infra && terraform plan -input=false") to verify the execution plan.
+2. execute("cd /infra && terraform plan -input=false -no-color")
 
-Analyze the terraform output and file contents. Does the generated code actually match \
-the requested architecture in the task? Are there any missing resources or logic errors?
-If anything is wrong, missing, or fails validation, explain the exact failures and state \
-clearly that validation FAILED.
-If everything works perfectly and perfectly matches the task description, state clearly \
-that validation PASSED.
+Then review the plan output carefully:
+- List every resource that terraform plans to create, modify, or destroy.
+- Compare each planned resource against the task description and research context.
+- Check: are ALL resources from the requested architecture present in the plan?
+- Check: are there any EXTRA resources not requested?
+- Check: are resource configurations correct (instance types, regions, names, etc.)?
+- Check: are resource dependencies and references wired correctly?
+
+If the plan shows all requested resources with correct configurations, state: \
+VALIDATION PASSED
+
+If any resources are missing, misconfigured, or the plan has errors, explain \
+exactly what is wrong and state: VALIDATION FAILED
 """
 
 _FIX_PROMPT = """\
@@ -222,7 +228,7 @@ def _generate(state: IaCState, model) -> dict[str, Any]:
 
 
 def _validate(state: IaCState, model, sandbox=None) -> dict[str, Any]:
-    """Agent node: create_deep_agent with execute to run terraform validate."""
+    """Agent node: run terraform plan and have LLM verify planned resources."""
     task = get_task_description(state)
     research = state.get("research_context", "")
     artifacts = state.get("tf_artifacts", {})
@@ -232,7 +238,7 @@ def _validate(state: IaCState, model, sandbox=None) -> dict[str, Any]:
         f"## Task\n{task}\n\n"
         f"## Research Context Summary\n{research[:500]}\n\n"
         f"## Generated Files\n{files_list}\n\n"
-        "Run terraform validation and plan now."
+        "Run terraform plan and verify the planned resources match the architecture above."
     )
     with traced_span("agent:iac.validate", {
         "agent.graph": "iac",
