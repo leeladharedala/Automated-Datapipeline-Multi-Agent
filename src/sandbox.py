@@ -84,7 +84,9 @@ def get_local_shell_backend() -> LocalShellBackend:
     if "backend" in _local_shell_cache:
         return _local_shell_cache["backend"]
 
-    backend = LocalShellBackend(root_dir="/tmp/agent-workspace")
+    root_dir = "/tmp/agent-workspace"
+    os.makedirs(root_dir, exist_ok=True)
+    backend = LocalShellBackend(root_dir=root_dir)
     _local_shell_cache["backend"] = backend
-    logger.info("LocalShellBackend ready at /tmp/agent-workspace")
+    logger.info("LocalShellBackend ready at %s", root_dir)
     return backend

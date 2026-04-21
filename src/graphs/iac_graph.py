@@ -119,6 +119,9 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
     write_file, edit_file, read_file, execute, ls, glob, grep.
     Tools passed via the `tools` parameter are added on top.
     Pass a backend (e.g. AgentCoreSandbox) to enable the execute tool.
+
+    Uses ainvoke (async) to support tools that only implement async invocation
+    (e.g. MCP StructuredTools from langchain-mcp-adapters).
     """
     from deepagents import create_deep_agent
 
@@ -131,7 +134,28 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
         kwargs["backend"] = backend
 
     agent = create_deep_agent(**kwargs)
-    result = agent.invoke({"messages": [HumanMessage(content=user_message)]})
+
+    # Use ainvoke to support async-only tools (MCP StructuredTools).
+    # If there's already a running event loop, schedule on it; otherwise
+    # create a new one.
+    async def _ainvoke():
+        return await agent.ainvoke({"messages": [HumanMessage(content=user_message)]})
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        # We're inside an async context (e.g. called from a sync function
+        # running in an executor within an async graph). Use a new thread
+        # to avoid blocking the running loop.
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            result = pool.submit(asyncio.run, _ainvoke()).result()
+    else:
+        result = asyncio.run(_ainvoke())
+
     # Extract the last AI message
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
@@ -338,7 +362,7 @@ def build_iac_graph(model, tools=None):
 
     # Closures capture model and tools from factory args
     # Cache for lazily-loaded MCP tools (loaded once on first research call)
-    _cached_tools: dict[str, Any] = {"tools": tools or [], "client": None}
+    _cached_tools: dict[str, Any] = {"tools": tools or [], "clients": None}
 
     # Load Code Interpreter sandbox for validate/fix nodes
     from src.sandbox import get_local_shell_backend

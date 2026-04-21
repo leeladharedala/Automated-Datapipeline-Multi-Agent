@@ -90,7 +90,11 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
     Extra tools (e.g. browser tools) are passed on top of the built-in
     DeepAgent tool stack (write_file, edit_file, read_file, execute, etc.).
     Pass a backend (e.g. AgentCoreSandbox) to enable the execute tool.
+
+    Uses ainvoke (async) to support tools that only implement async invocation
+    (e.g. Code Interpreter StructuredTools from langchain-aws).
     """
+    import asyncio
     from deepagents import create_deep_agent
 
     kwargs = dict(
@@ -102,7 +106,22 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
         kwargs["backend"] = backend
 
     agent = create_deep_agent(**kwargs)
-    result = agent.invoke({"messages": [HumanMessage(content=user_message)]})
+
+    async def _ainvoke():
+        return await agent.ainvoke({"messages": [HumanMessage(content=user_message)]})
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            result = pool.submit(asyncio.run, _ainvoke()).result()
+    else:
+        result = asyncio.run(_ainvoke())
+
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
             from src.graphs._utils import _content_to_str
@@ -122,7 +141,7 @@ Do not add any commentary before or after the JSON.
 """
 
 
-def _sample_data(state: DataEngState, model, backend=None) -> dict[str, Any]:
+def _sample_data(state: DataEngState, model, backend=None, ci_tools=None) -> dict[str, Any]:
     """Agent node: use execute tool via DeepAgent to sample data from S3.
 
     Creates a mini DeepAgent that runs a pandas script using the
@@ -130,6 +149,13 @@ def _sample_data(state: DataEngState, model, backend=None) -> dict[str, Any]:
     in the container where IAM role credentials are available for S3 access.
     Falls back gracefully if S3 access fails.
     """
+    import os
+
+    # Ensure the backend's working directory exists (it may have been
+    # cleaned up by a previous Code Interpreter session).
+    if backend is not None and hasattr(backend, "root_dir"):
+        os.makedirs(backend.root_dir, exist_ok=True)
+
     task = get_task_description(state)
     s3_match = re.search(r"s3://\S+", task)
     if not s3_match:
@@ -186,6 +212,7 @@ def _sample_data(state: DataEngState, model, backend=None) -> dict[str, Any]:
                 _SAMPLE_DATA_PROMPT.format(sample_size=DEFAULT_SAMPLE_SIZE),
                 user_msg,
                 model,
+                tools=ci_tools,
                 backend=backend,
             )
 
@@ -400,7 +427,7 @@ def build_data_eng_graph(model, tools=None):
     graph = StateGraph(DataEngState)
 
     def sample_data(state: DataEngState) -> dict[str, Any]:
-        return _sample_data(state, model, backend=sandbox)
+        return _sample_data(state, model, backend=sandbox, ci_tools=ci_tools)
 
     def generate(state: DataEngState) -> dict[str, Any]:
         return _generate(state, model, browser_tools)

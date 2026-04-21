@@ -86,7 +86,12 @@ You will receive the actionlint error output. Your job:
 
 
 def _run_agent(system_prompt: str, user_message: str, model, backend=None) -> str:
-    """Create a mini DeepAgent, invoke it, and return the final AI message text."""
+    """Create a mini DeepAgent, invoke it, and return the final AI message text.
+
+    Uses ainvoke (async) for consistency with other graphs and to support
+    any async-only tools that may be added in the future.
+    """
+    import asyncio
     from deepagents import create_deep_agent
 
     kwargs = dict(model=model, system_prompt=system_prompt)
@@ -94,7 +99,22 @@ def _run_agent(system_prompt: str, user_message: str, model, backend=None) -> st
         kwargs["backend"] = backend
 
     agent = create_deep_agent(**kwargs)
-    result = agent.invoke({"messages": [HumanMessage(content=user_message)]})
+
+    async def _ainvoke():
+        return await agent.ainvoke({"messages": [HumanMessage(content=user_message)]})
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            result = pool.submit(asyncio.run, _ainvoke()).result()
+    else:
+        result = asyncio.run(_ainvoke())
+
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
             from src.graphs._utils import _content_to_str
