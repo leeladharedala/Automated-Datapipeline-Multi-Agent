@@ -51,7 +51,13 @@ def get_code_interpreter_tools() -> list:
         t.start()
 
         async def _setup():
-            toolkit, tools = await create_code_interpreter_toolkit(region=REGION)
+            # Use the custom Code Interpreter if configured (has execution
+            # role with S3 access), otherwise fall back to the default.
+            ci_id = os.environ.get("AGENTCORE_CODE_INTERPRETER_ID")
+            kwargs = {"region": REGION}
+            if ci_id:
+                kwargs["code_interpreter_identifier"] = ci_id
+            toolkit, tools = await create_code_interpreter_toolkit(**kwargs)
             # Pre-install validation dependencies
             logger.info("Pre-installing sandbox dependencies...")
             tools_by_name = toolkit.get_tools_by_name()

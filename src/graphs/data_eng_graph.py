@@ -15,8 +15,10 @@ and sandbox execution (execute) — artifacts are persisted to AgentCore short-t
 memory via the shared VFS.
 """
 
+import io
 import json
 import logging
+import os
 import re
 from typing import Any
 
@@ -142,63 +144,40 @@ Do not add any commentary before or after the JSON.
 
 
 def _sample_data(state: DataEngState, model, backend=None, ci_tools=None) -> dict[str, Any]:
-    """Agent node: use execute tool via DeepAgent to sample data from S3.
+    """Sample data schema directly from S3 using boto3 + pandas in-process.
 
-    Creates a mini DeepAgent that runs a pandas script using the
-    LocalShellBackend (same as IaC/CI-CD validation). This runs directly
-    in the container where IAM role credentials are available for S3 access.
+    Runs in the container where IAM role credentials are available.
+    Neither the LocalShellBackend nor the Code Interpreter MicroVM have
+    S3 credentials, so we sample directly using the container's execution
+    role instead of delegating to a DeepAgent.
     Falls back gracefully if S3 access fails.
     """
-    import os
-
-    # Ensure the backend's working directory exists (it may have been
-    # cleaned up by a previous Code Interpreter session).
-    if backend is not None and hasattr(backend, "root_dir"):
-        os.makedirs(backend.root_dir, exist_ok=True)
-
     task = get_task_description(state)
     s3_match = re.search(r"s3://\S+", task)
     if not s3_match:
         return {"inferred_schema": {}, "data_sample_status": "skipped"}
 
+    import io
+    import os
+
+    import boto3
+    import pandas as pd
+
     s3_uri = s3_match.group(0)
+
+    # Parse bucket and key from s3://bucket/key
+    parts = s3_uri.replace("s3://", "").split("/", 1)
+    bucket = parts[0]
+    key = parts[1] if len(parts) > 1 else ""
 
     # Auto-detect format from task description
     task_lower = task.lower()
     if "csv" in task_lower:
         fmt = "csv"
-        read_call = f'pd.read_csv("{s3_uri}", nrows={DEFAULT_SAMPLE_SIZE})'
     elif "json" in task_lower:
         fmt = "json"
-        read_call = f'pd.read_json("{s3_uri}", lines=True, nrows={DEFAULT_SAMPLE_SIZE})'
     else:
         fmt = "parquet"
-        read_call = f'pd.read_parquet("{s3_uri}").head({DEFAULT_SAMPLE_SIZE})'
-
-    sampling_script = (
-        "import pandas as pd\n"
-        "import json\n"
-        "\n"
-        "try:\n"
-        f"    df = {read_call}\n"
-        "    schema = []\n"
-        "    for col in df.columns:\n"
-        "        schema.append({\n"
-        '            "name": col,\n'
-        '            "type": str(df[col].dtype),\n'
-        '            "nullable": bool(df[col].isnull().any()),\n'
-        "        })\n"
-        "    row_count = len(df)\n"
-        '    print(json.dumps({"status": "success", "columns": schema, "row_count": row_count}))\n'
-        "except Exception as e:\n"
-        '    print(json.dumps({"status": "failed", "error": str(e)}))\n'
-    )
-
-    user_msg = (
-        f"Run the following Python script using the execute tool.\n\n"
-        f"```python\n{sampling_script}\n```\n\n"
-        f"Respond with ONLY the JSON output line from the script."
-    )
 
     try:
         with traced_span("agent:data_eng.sample_data", {
@@ -208,34 +187,35 @@ def _sample_data(state: DataEngState, model, backend=None, ci_tools=None) -> dic
             "sample.format": fmt,
             "sample.size": DEFAULT_SAMPLE_SIZE,
         }):
-            response = _run_agent(
-                _SAMPLE_DATA_PROMPT.format(sample_size=DEFAULT_SAMPLE_SIZE),
-                user_msg,
-                model,
-                tools=ci_tools,
-                backend=backend,
-            )
+            region = os.environ.get("AWS_REGION", "us-west-2")
+            s3 = boto3.client("s3", region_name=region)
+            obj = s3.get_object(Bucket=bucket, Key=key)
+            body = obj["Body"].read()
 
-        # Try to extract JSON from the response
-        json_match = re.search(r'\{[^{}]*"status"\s*:\s*"[^"]*"[^{}]*\}', response)
-        if json_match:
-            output = json.loads(json_match.group(0))
-        else:
-            output = json.loads(response.strip())
+            if fmt == "csv":
+                df = pd.read_csv(io.BytesIO(body), nrows=DEFAULT_SAMPLE_SIZE)
+            elif fmt == "json":
+                df = pd.read_json(io.BytesIO(body), lines=True, nrows=DEFAULT_SAMPLE_SIZE)
+            else:
+                df = pd.read_parquet(io.BytesIO(body)).head(DEFAULT_SAMPLE_SIZE)
 
-        if output.get("status") == "success":
+            schema = []
+            for col in df.columns:
+                schema.append({
+                    "name": col,
+                    "type": str(df[col].dtype),
+                    "nullable": bool(df[col].isnull().any()),
+                })
+
             return {
                 "inferred_schema": {
-                    "columns": output["columns"],
-                    "row_count": output["row_count"],
+                    "columns": schema,
+                    "row_count": len(df),
                 },
                 "data_sample_status": "success",
             }
-        else:
-            logger.error("Data sampling failed: %s", output.get("error", "unknown"))
-            return {"inferred_schema": {}, "data_sample_status": "failed"}
     except Exception as exc:
-        logger.error("Data sampling exception: %s", exc)
+        logger.error("Data sampling failed: %s", exc)
         return {"inferred_schema": {}, "data_sample_status": "failed"}
 
 
@@ -427,7 +407,7 @@ def build_data_eng_graph(model, tools=None):
     graph = StateGraph(DataEngState)
 
     def sample_data(state: DataEngState) -> dict[str, Any]:
-        return _sample_data(state, model, backend=sandbox, ci_tools=ci_tools)
+        return _sample_data(state, model)
 
     def generate(state: DataEngState) -> dict[str, Any]:
         return _generate(state, model, browser_tools)
