@@ -1,6 +1,6 @@
 """Sandbox backends for subagent validation nodes.
 
-- Code Interpreter toolkit (langchain-aws): Used by data-eng for pytest/pyspark
+- Code Interpreter toolkit (langchain-aws): Used by data-eng for structural
   validation in an isolated MicroVM. Provides execute_code, install_packages, etc.
 - LocalShellBackend: Used by IaC and CI/CD for terraform/actionlint which
   are pre-installed in the AgentCore Runtime container.
@@ -28,8 +28,7 @@ def get_code_interpreter_tools() -> list:
     Uses langchain-aws's create_code_interpreter_toolkit which provides
     execute_code, install_packages, write_files, etc. as LangChain tools.
 
-    Pre-installs pytest, pandas, pyspark on first call so validate nodes
-    don't waste time installing on every invocation.
+    Validation uses only stdlib (ast module), so no packages are pre-installed.
 
     Returns an empty list if setup fails (callers fall back gracefully).
     """
@@ -58,14 +57,6 @@ def get_code_interpreter_tools() -> list:
             if ci_id:
                 kwargs["code_interpreter_identifier"] = ci_id
             toolkit, tools = await create_code_interpreter_toolkit(**kwargs)
-            # Pre-install validation dependencies
-            logger.info("Pre-installing sandbox dependencies...")
-            tools_by_name = toolkit.get_tools_by_name()
-            tools_by_name["install_packages"].invoke({
-                "packages": ["pytest", "pandas", "pyspark", "pyyaml", "s3fs", "fsspec"],
-                "upgrade": False,
-            })
-            logger.info("Sandbox dependencies installed")
             return toolkit, tools
 
         future = asyncio.run_coroutine_threadsafe(_setup(), loop)

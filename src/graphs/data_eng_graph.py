@@ -42,10 +42,9 @@ read_file tools that write to a shared VFS (persisted by AgentCore Memory), \
 and browser tools for looking up framework documentation on-demand.
 
 Given the task description below, generate production-grade PySpark data \
-transformation code with tests. Write the following files using write_file:
+transformation code. Write the following files using write_file:
 - /src/transformations/transform.py — Core PySpark DataFrame transformation logic
 - /src/transformations/__init__.py — Package init (import the main transform)
-- /tests/test_transform.py — pytest test suite using a local SparkSession
 
 TRANSFORMATION CODE rules:
 - Use PySpark DataFrames for ALL transformations (read from and write to S3 paths).
@@ -60,16 +59,7 @@ TRANSFORMATION CODE rules:
 - Add logging with Python's logging module, not print statements.
 - If unsure about PySpark API details, use the browser tool to look up official docs.
 
-TEST SUITE rules:
-- Create a local SparkSession fixture with .master("local[2]") for parallelism testing.
-- Cover: happy path, empty DataFrame, null handling, schema mismatch, and duplicate rows.
-- Use small inline test data (createDataFrame with explicit schema), not external files.
-- Assert on both schema (column names + types) and row-level values.
-- Use pytest.mark.parametrize for testing multiple transformation scenarios.
-- Test that output partitioning is correct when applicable.
-- Never hardcode credentials in transformation code or tests.
-
-Write ALL three files, then respond with a summary of what you wrote.
+Write ALL files, then respond with a summary of what you wrote.
 """
 
 _FIX_PROMPT = """\
@@ -77,12 +67,15 @@ You are a data engineering debugging expert. You have access to read_file, \
 edit_file tools that operate on a shared VFS, and browser tools for looking \
 up framework documentation on-demand.
 
-You will receive the pytest failure output. Your job:
+You will receive the validation failure output. Your job:
 1. Read the broken file(s) using read_file
 2. Analyze the error and identify the root cause
 3. If unsure about an API or behavior, use the browser tool to look up docs
 4. Fix ONLY the broken file(s) using edit_file — do not regenerate everything
 5. Respond with a summary of what you fixed and why
+
+Common issues: missing main() entry point, syntax errors, missing pyspark imports, \
+missing required files.
 """
 
 
@@ -163,12 +156,16 @@ def _sample_data(state: DataEngState, model, backend=None, ci_tools=None) -> dic
     import boto3
     import pandas as pd
 
-    s3_uri = s3_match.group(0)
+    s3_uri = s3_match.group(0).rstrip("/")
 
     # Parse bucket and key from s3://bucket/key
     parts = s3_uri.replace("s3://", "").split("/", 1)
     bucket = parts[0]
     key = parts[1] if len(parts) > 1 else ""
+
+    if not key:
+        logger.warning("S3 URI %s has no object key, skipping sampling", s3_uri)
+        return {"inferred_schema": {}, "data_sample_status": "skipped"}
 
     # Auto-detect format from task description
     task_lower = task.lower()
@@ -189,6 +186,30 @@ def _sample_data(state: DataEngState, model, backend=None, ci_tools=None) -> dic
         }):
             region = os.environ.get("AWS_REGION", "us-west-2")
             s3 = boto3.client("s3", region_name=region)
+
+            # If the key looks like a prefix (no file extension), list objects
+            # and pick the first matching file to sample from.
+            _, ext = os.path.splitext(key)
+            if not ext:
+                resp = s3.list_objects_v2(Bucket=bucket, Prefix=key.rstrip("/") + "/", MaxKeys=10)
+                contents = resp.get("Contents", [])
+                # Filter to files with a recognized extension
+                fmt_ext_map = {"csv": ".csv", "json": ".json", "parquet": ".parquet"}
+                target_ext = fmt_ext_map.get(fmt, "")
+                candidates = [
+                    obj_meta["Key"] for obj_meta in contents
+                    if not obj_meta["Key"].endswith("/")
+                    and (not target_ext or obj_meta["Key"].endswith(target_ext))
+                ]
+                if not candidates:
+                    logger.warning(
+                        "No sampleable files found under s3://%s/%s, skipping",
+                        bucket, key,
+                    )
+                    return {"inferred_schema": {}, "data_sample_status": "skipped"}
+                key = candidates[0]
+                logger.info("Resolved prefix to object: s3://%s/%s", bucket, key)
+
             obj = s3.get_object(Bucket=bucket, Key=key)
             body = obj["Body"].read()
 
@@ -255,20 +276,77 @@ def _generate(state: DataEngState, model, tools: list) -> dict[str, Any]:
     code_artifacts = {
         "transform.py": "/src/transformations/transform.py",
         "__init__.py": "/src/transformations/__init__.py",
-        "test_transform.py": "/tests/test_transform.py",
     }
     return {"code_artifacts": code_artifacts, "messages": [AIMessage(content=response)]}
 
 
 _VALIDATE_PROMPT = """\
-You are a pytest validation runner. You have access to the execute tool \
+You are a code structure validator. You have access to the execute tool \
 which runs commands in the AgentCore Runtime sandbox.
 
-Run the following steps:
-1. execute("pip install pytest pandas pyspark")
-2. execute("python -m pytest /tests/test_transform.py -v --tb=long")
+Validate the generated PySpark transformation code by running a structural \
+check script. Do NOT attempt to run PySpark — it is not available in this sandbox.
 
-Report the full pytest output. State clearly whether validation PASSED or FAILED.
+Run the following validation script using the execute tool:
+
+```python
+import ast, sys, os
+
+errors = []
+func_names = []
+
+# 1. Check required files exist
+required = ["/src/transformations/transform.py", "/src/transformations/__init__.py"]
+for f in required:
+    if not os.path.exists(f):
+        errors.append(f"MISSING: {f}")
+
+# 2. Parse transform.py for syntax and structure
+tf = "/src/transformations/transform.py"
+if os.path.exists(tf):
+    source = open(tf).read()
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as e:
+        errors.append(f"SYNTAX ERROR in transform.py: {e}")
+        tree = None
+
+    if tree:
+        func_names = [n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        if not func_names:
+            errors.append("NO FUNCTIONS found in transform.py")
+        if "main" not in func_names:
+            errors.append("MISSING main() entry point in transform.py")
+
+        imports = [n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]
+        has_pyspark = any(
+            (isinstance(n, ast.ImportFrom) and n.module and "pyspark" in n.module)
+            or (isinstance(n, ast.Import) and any("pyspark" in a.name for a in n.names))
+            for n in imports
+        )
+        if not has_pyspark:
+            errors.append("NO pyspark imports found - expected PySpark DataFrame code")
+
+# 3. Parse __init__.py for syntax
+init = "/src/transformations/__init__.py"
+if os.path.exists(init):
+    try:
+        ast.parse(open(init).read())
+    except SyntaxError as e:
+        errors.append(f"SYNTAX ERROR in __init__.py: {e}")
+
+if errors:
+    print("VALIDATION: FAILED")
+    for e in errors:
+        print(f"  - {e}")
+    sys.exit(1)
+else:
+    print("VALIDATION: PASSED")
+    print(f"  - Functions found: {', '.join(func_names)}")
+    print("  - All required files present and syntactically valid")
+```
+
+Report the full output. State clearly whether validation PASSED or FAILED.
 """
 
 
