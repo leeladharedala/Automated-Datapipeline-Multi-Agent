@@ -88,13 +88,6 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
 
     Uses ainvoke (async) to support tools that only implement async invocation
     (e.g. Code Interpreter StructuredTools from langchain-aws).
-
-    NOTE: We avoid asyncio.run() because it closes the event loop immediately
-    after the coroutine returns.  Anthropic's httpx/anyio streaming client
-    schedules deferred TLS-teardown callbacks (via call_soon) that fire after
-    the loop is already closed, causing ``RuntimeError: Event loop is closed``.
-    Instead we create a dedicated loop, run all pending callbacks via
-    shutdown_asyncgens + shutdown_default_executor, and only then close it.
     """
     import asyncio
     from deepagents import create_deep_agent
@@ -106,40 +99,34 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
     )
     if backend is not None:
         kwargs["backend"] = backend
+    kwargs["checkpointer"] = False  # FIX: disable checkpointing for inner agents
 
     agent = create_deep_agent(**kwargs)
 
     async def _ainvoke():
         return await agent.ainvoke({"messages": [HumanMessage(content=user_message)]})
 
-    def _run_in_fresh_loop(coro):
-        """Run *coro* in a new event loop, draining all deferred callbacks
-        (e.g. httpx TLS connection cleanup) before closing the loop."""
-        loop = asyncio.new_event_loop()
-        try:
-            result = loop.run_until_complete(coro)
-            # Drain any callbacks that were scheduled during the coroutine
-            # (e.g. anyio TLS stream close → transport.close → call_soon).
-            loop.run_until_complete(loop.shutdown_asyncgens())
-            loop.run_until_complete(loop.shutdown_default_executor())
-            return result
-        finally:
-            # All pending callbacks have been executed; safe to close now.
-            loop.close()
-
     try:
-        running_loop = asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
     except RuntimeError:
-        running_loop = None
+        loop = None
 
-    if running_loop and running_loop.is_running():
-        # We're inside an executor thread spawned by LangGraph's
-        # run_in_executor — create a fresh loop in this thread.
+    if loop and loop.is_running():
         import concurrent.futures
+        new_loop = asyncio.new_event_loop()  # FIX: isolated loop
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            result = pool.submit(_run_in_fresh_loop, _ainvoke()).result()
+            def _run():
+                try:
+                    return new_loop.run_until_complete(_ainvoke())
+                finally:
+                    new_loop.close()
+            result = pool.submit(_run).result()
     else:
-        result = _run_in_fresh_loop(_ainvoke())
+        new_loop = asyncio.new_event_loop()  # FIX: isolated loop
+        try:
+            result = new_loop.run_until_complete(_ainvoke())
+        finally:
+            new_loop.close()
 
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:

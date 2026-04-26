@@ -132,6 +132,7 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
     )
     if backend is not None:
         kwargs["backend"] = backend
+    kwargs["checkpointer"] = False  # FIX: disable checkpointing for inner agents
 
     agent = create_deep_agent(**kwargs)
 
@@ -151,10 +152,20 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
         # running in an executor within an async graph). Use a new thread
         # to avoid blocking the running loop.
         import concurrent.futures
+        new_loop = asyncio.new_event_loop()  # FIX: isolated loop
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            result = pool.submit(asyncio.run, _ainvoke()).result()
+            def _run():
+                try:
+                    return new_loop.run_until_complete(_ainvoke())
+                finally:
+                    new_loop.close()
+            result = pool.submit(_run).result()
     else:
-        result = asyncio.run(_ainvoke())
+        new_loop = asyncio.new_event_loop()  # FIX: isolated loop
+        try:
+            result = new_loop.run_until_complete(_ainvoke())
+        finally:
+            new_loop.close()
 
     # Extract the last AI message
     for msg in reversed(result["messages"]):

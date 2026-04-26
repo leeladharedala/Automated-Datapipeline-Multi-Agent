@@ -97,6 +97,7 @@ def _run_agent(system_prompt: str, user_message: str, model, backend=None) -> st
     kwargs = dict(model=model, system_prompt=system_prompt)
     if backend is not None:
         kwargs["backend"] = backend
+    kwargs["checkpointer"] = False
 
     agent = create_deep_agent(**kwargs)
 
@@ -110,10 +111,20 @@ def _run_agent(system_prompt: str, user_message: str, model, backend=None) -> st
 
     if loop and loop.is_running():
         import concurrent.futures
+        new_loop = asyncio.new_event_loop()
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            result = pool.submit(asyncio.run, _ainvoke()).result()
+            def _run():
+                try:
+                    return new_loop.run_until_complete(_ainvoke())
+                finally:
+                    new_loop.close()
+            result = pool.submit(_run).result()
     else:
-        result = asyncio.run(_ainvoke())
+        new_loop = asyncio.new_event_loop()
+        try:
+            result = new_loop.run_until_complete(_ainvoke())
+        finally:
+            new_loop.close()
 
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
