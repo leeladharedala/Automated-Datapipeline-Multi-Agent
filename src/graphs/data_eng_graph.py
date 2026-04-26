@@ -115,18 +115,14 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
         import concurrent.futures
         new_loop = asyncio.new_event_loop()  # FIX: isolated loop
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            def _run():
-                try:
-                    return new_loop.run_until_complete(_ainvoke())
-                finally:
-                    new_loop.close()
-            result = pool.submit(_run).result()
+            result = pool.submit(new_loop.run_until_complete, _ainvoke()).result()
+        # Do NOT close new_loop — the model's httpx client may hold
+        # transport connections bound to this loop.  Closing it would
+        # destroy those transports and cause "Event loop is closed" on
+        # the next _run_agent() call when httpx tries to reuse them.
     else:
         new_loop = asyncio.new_event_loop()  # FIX: isolated loop
-        try:
-            result = new_loop.run_until_complete(_ainvoke())
-        finally:
-            new_loop.close()
+        result = new_loop.run_until_complete(_ainvoke())
 
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
