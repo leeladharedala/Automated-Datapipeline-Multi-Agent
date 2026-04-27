@@ -124,6 +124,7 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
     Uses ainvoke (async) to support tools that only implement async invocation
     (e.g. MCP StructuredTools from langchain-mcp-adapters).
     """
+    import asyncio
     from deepagents import create_deep_agent
 
     kwargs = dict(
@@ -137,33 +138,23 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
 
     agent = create_deep_agent(**kwargs)
 
-    # Use ainvoke to support async-only tools (MCP StructuredTools).
-    # If there's already a running event loop, schedule on it; otherwise
-    # create a new one.
     async def _ainvoke():
         return await agent.ainvoke({"messages": [HumanMessage(content=user_message)]})
 
+    # Run on the current event loop — use nest_asyncio to allow re-entrant
+    # event loop usage instead of creating a new loop (which causes
+    # "bound to a different event loop" errors with shared httpx clients).
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
 
     if loop and loop.is_running():
-        # We're inside an async context (e.g. called from a sync function
-        # running in an executor within an async graph). Use a new thread
-        # to avoid blocking the running loop.
-        import concurrent.futures
-        new_loop = asyncio.new_event_loop()  # FIX: isolated loop
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            result = pool.submit(new_loop.run_until_complete, _ainvoke()).result()
-        # Do NOT close new_loop — the model's httpx client may hold
-        # transport connections bound to this loop.  Closing it would
-        # destroy those transports and cause "Event loop is closed" on
-        # the next _run_agent() call when httpx tries to reuse them.
-        # The loop is GC'd when the reference goes out of scope.
+        import nest_asyncio
+        nest_asyncio.apply(loop)
+        result = loop.run_until_complete(_ainvoke())
     else:
-        new_loop = asyncio.new_event_loop()  # FIX: isolated loop
-        result = new_loop.run_until_complete(_ainvoke())
+        result = asyncio.run(_ainvoke())
 
     # Extract the last AI message
     for msg in reversed(result["messages"]):

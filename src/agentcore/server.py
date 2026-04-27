@@ -76,13 +76,70 @@ async def invocations(payload, context: RequestContext):
         session_id = getattr(context, "session_id", None) or payload.get("runtimeSessionId", "default-session")
         config = {"configurable": {"thread_id": session_id, "actor_id": session_id}}
 
+        chunk_count = 0
+        dispatched_agents: dict[str, str] = {}  # tool_call_id → agent_name
+        logger.info("Starting astream for session=%s", session_id)
+
         async for event in graph.astream(
             {"messages": [("user", user_query)]},
             config=config,
             stream_mode="messages",
         ):
             message_chunk, metadata = event
-            yield message_chunk.model_dump()
+            dumped = message_chunk.model_dump()
+            chunk_count += 1
+
+            # Log the first few chunks to diagnose stream format
+            if chunk_count <= 5:
+                content_preview = str(dumped.get("content", ""))[:200]
+                logger.info(
+                    "Chunk #%d type=%s content_preview=%s tool_calls=%s",
+                    chunk_count,
+                    dumped.get("type", "unknown"),
+                    content_preview,
+                    bool(dumped.get("tool_calls")),
+                )
+
+            # --- Detect sub-agent dispatch (AIMessageChunk with tool_calls) ---
+            tool_calls = dumped.get("tool_calls") or []
+            for tc in tool_calls:
+                tc_name = tc.get("name", "")
+                if tc_name == "task":
+                    args = tc.get("args", {})
+                    agent_name = args.get("agent_name") or args.get("name", "")
+                    tc_id = tc.get("id", "")
+                    if agent_name:
+                        dispatched_agents[tc_id] = agent_name
+                        logger.info("Sub-agent dispatched: %s → running", agent_name)
+                        yield {
+                            "__pipeline_status__": True,
+                            "dispatch_statuses": {agent_name: "running"},
+                        }
+
+            # --- Detect sub-agent completion (ToolMessage) ---
+            msg_type = dumped.get("type", "")
+            if msg_type == "tool":
+                tc_id = dumped.get("tool_call_id", "")
+                agent_name = dispatched_agents.get(tc_id, "")
+                if agent_name:
+                    result_text = str(dumped.get("content", ""))
+                    passed = "PASSED" in result_text.upper()
+                    status = "success" if passed else "failed"
+                    logger.info("Sub-agent completed: %s → %s", agent_name, status)
+                    yield {
+                        "__pipeline_status__": True,
+                        "dispatch_statuses": {agent_name: status},
+                        "accumulated_results": {agent_name: result_text[:500]},
+                    }
+
+            yield dumped
+
+        logger.info("Stream complete: yielded %d chunks", chunk_count)
+
+        # If zero chunks were yielded, send a fallback so the UI isn't blank
+        if chunk_count == 0:
+            logger.warning("No chunks yielded — sending fallback")
+            yield {"content": "Agent completed but produced no streaming output.", "type": "ai"}
 
     except Exception as exc:
         logger.exception("Agent run failed")

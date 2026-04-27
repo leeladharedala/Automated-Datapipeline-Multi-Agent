@@ -6,6 +6,7 @@ langchain==1.2.10
 langchain-anthropic>=1.3.4
 langchain-openai>=1.1.0
 langchain-mcp-adapters>=0.2.0
+nest_asyncio>=1.6.0
 
 # CopilotKit AG-UI integration
 copilotkit==0.1.84

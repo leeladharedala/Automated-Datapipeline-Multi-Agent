@@ -88,15 +88,9 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
 
     Uses ainvoke (async) to support tools that only implement async invocation
     (e.g. Code Interpreter StructuredTools from langchain-aws).
-
-    When ci_tools is non-empty and the sandbox background loop exists,
-    ainvoke is scheduled on that loop via run_coroutine_threadsafe so that
-    Code Interpreter tools' asyncio primitives are accessed from their
-    owning loop.
     """
     import asyncio
     from deepagents import create_deep_agent
-    from src.sandbox import _code_interpreter_cache
 
     kwargs = dict(
         model=model,
@@ -112,30 +106,20 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
     async def _ainvoke():
         return await agent.ainvoke({"messages": [HumanMessage(content=user_message)]})
 
-    # When CI tools are present and the sandbox background loop exists,
-    # schedule on that loop to avoid cross-loop RuntimeError.
-    sandbox_loop = _code_interpreter_cache.get("loop") if ci_tools else None
+    # Run on the current event loop — use nest_asyncio to allow re-entrant
+    # event loop usage instead of creating a new loop (which causes
+    # "bound to a different event loop" errors with shared httpx clients).
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
 
-    if sandbox_loop:
-        result = asyncio.run_coroutine_threadsafe(_ainvoke(), sandbox_loop).result()
+    if loop and loop.is_running():
+        import nest_asyncio
+        nest_asyncio.apply(loop)
+        result = loop.run_until_complete(_ainvoke())
     else:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            import concurrent.futures
-            new_loop = asyncio.new_event_loop()  # FIX: isolated loop
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                result = pool.submit(new_loop.run_until_complete, _ainvoke()).result()
-            # Do NOT close new_loop — the model's httpx client may hold
-            # transport connections bound to this loop.  Closing it would
-            # destroy those transports and cause "Event loop is closed" on
-            # the next _run_agent() call when httpx tries to reuse them.
-        else:
-            new_loop = asyncio.new_event_loop()  # FIX: isolated loop
-            result = new_loop.run_until_complete(_ainvoke())
+        result = asyncio.run(_ainvoke())
 
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
