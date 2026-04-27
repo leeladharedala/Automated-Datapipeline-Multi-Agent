@@ -79,7 +79,7 @@ missing required files.
 """
 
 
-def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend=None) -> str:
+def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend=None, ci_tools=None) -> str:
     """Create a mini DeepAgent, invoke it, and return the final AI message text.
 
     Extra tools (e.g. browser tools) are passed on top of the built-in
@@ -88,9 +88,15 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
 
     Uses ainvoke (async) to support tools that only implement async invocation
     (e.g. Code Interpreter StructuredTools from langchain-aws).
+
+    When ci_tools is non-empty and the sandbox background loop exists,
+    ainvoke is scheduled on that loop via run_coroutine_threadsafe so that
+    Code Interpreter tools' asyncio primitives are accessed from their
+    owning loop.
     """
     import asyncio
     from deepagents import create_deep_agent
+    from src.sandbox import _code_interpreter_cache
 
     kwargs = dict(
         model=model,
@@ -106,23 +112,30 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
     async def _ainvoke():
         return await agent.ainvoke({"messages": [HumanMessage(content=user_message)]})
 
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
+    # When CI tools are present and the sandbox background loop exists,
+    # schedule on that loop to avoid cross-loop RuntimeError.
+    sandbox_loop = _code_interpreter_cache.get("loop") if ci_tools else None
 
-    if loop and loop.is_running():
-        import concurrent.futures
-        new_loop = asyncio.new_event_loop()  # FIX: isolated loop
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            result = pool.submit(new_loop.run_until_complete, _ainvoke()).result()
-        # Do NOT close new_loop — the model's httpx client may hold
-        # transport connections bound to this loop.  Closing it would
-        # destroy those transports and cause "Event loop is closed" on
-        # the next _run_agent() call when httpx tries to reuse them.
+    if sandbox_loop:
+        result = asyncio.run_coroutine_threadsafe(_ainvoke(), sandbox_loop).result()
     else:
-        new_loop = asyncio.new_event_loop()  # FIX: isolated loop
-        result = new_loop.run_until_complete(_ainvoke())
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import concurrent.futures
+            new_loop = asyncio.new_event_loop()  # FIX: isolated loop
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                result = pool.submit(new_loop.run_until_complete, _ainvoke()).result()
+            # Do NOT close new_loop — the model's httpx client may hold
+            # transport connections bound to this loop.  Closing it would
+            # destroy those transports and cause "Event loop is closed" on
+            # the next _run_agent() call when httpx tries to reuse them.
+        else:
+            new_loop = asyncio.new_event_loop()  # FIX: isolated loop
+            result = new_loop.run_until_complete(_ainvoke())
 
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
@@ -377,7 +390,7 @@ def _validate(state: DataEngState, model, ci_tools=None) -> dict[str, Any]:
             "agent.node": "validate",
             "agent.artifact_count": len(artifacts),
         }):
-            response = _run_agent(_VALIDATE_PROMPT, user_msg, model, tools=ci_tools)
+            response = _run_agent(_VALIDATE_PROMPT, user_msg, model, tools=ci_tools, ci_tools=ci_tools)
     except Exception as exc:
         response = str(exc)
 
@@ -402,7 +415,7 @@ def _validate(state: DataEngState, model, ci_tools=None) -> dict[str, Any]:
     }
 
 
-def _fix(state: DataEngState, model, tools: list) -> dict[str, Any]:
+def _fix(state: DataEngState, model, tools: list, ci_tools=None) -> dict[str, Any]:
     """Agent node: fix pytest failures using Code Interpreter + browser tools."""
     attempt = state.get("attempt", 0) + 1
     error_output = state.get("validation_output", "")
@@ -427,7 +440,7 @@ def _fix(state: DataEngState, model, tools: list) -> dict[str, Any]:
         "agent.attempt": attempt,
         "agent.tool_count": len(tools),
     }):
-        response = _run_agent(_FIX_PROMPT, user_msg, model, tools=tools)
+        response = _run_agent(_FIX_PROMPT, user_msg, model, tools=tools, ci_tools=ci_tools)
 
     return {"attempt": attempt, "messages": [AIMessage(content=response)]}
 
@@ -501,7 +514,7 @@ def build_data_eng_graph(model, tools=None):
         return _validate(state, model, ci_tools=ci_tools)
 
     def fix(state: DataEngState) -> dict[str, Any]:
-        return _fix(state, model, browser_tools + ci_tools)
+        return _fix(state, model, browser_tools + ci_tools, ci_tools=ci_tools)
 
     def report(state: DataEngState) -> dict[str, Any]:
         return _report(state)

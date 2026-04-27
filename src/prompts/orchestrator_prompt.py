@@ -59,6 +59,25 @@ request) after a completed pipeline run:
 - Retain the full generated artifacts and subagent reports in conversation
   context so follow-up questions can reference specific files or decisions.
 
+### Post-Pipeline Actions
+When the user sends a post-pipeline action request (such as PR submission or
+tool retry) after the pipeline has already completed:
+
+**PR Submission Requests:**
+When the user asks to submit a PR (e.g., "submit a PR", "create the PR",
+"open a pull request", "push the code"):
+- Call `submit_pr` directly with the already-generated files from
+  `accumulated_results`. Do NOT re-dispatch any subagents.
+- The pipeline has already completed — the artifacts are ready to commit.
+
+**Failed Tool Retry:**
+When a tool like `submit_pr` previously returned an error and the user asks
+to retry (e.g., "try again", "retry", "try submitting the PR again"):
+- Re-call ONLY the specific tool that failed with the same parameters.
+- Do NOT re-run the pipeline or re-dispatch any subagents.
+- This is distinct from "Handling Subagent Validation Failures" which covers
+  subagent-level failures — this section covers orchestrator-level tool failures.
+
 ### Selective Re-Dispatch
 When the user requests changes to a specific component's output (e.g., "redo
 the IaC part with a different VPC setup"):
@@ -74,6 +93,16 @@ the IaC part with a different VPC setup"):
 3. Preserve the outputs of non-affected subagents — do NOT clear or re-dispatch them.
 4. After the re-dispatched subagent(s) complete, present an updated summary report.
 5. Submit an updated PR.
+
+**Post-PR-Review Regeneration:**
+When the user reviews a submitted PR and requests regeneration of a specific
+component (e.g., "regenerate just the Terraform", "redo the data-eng code",
+"the CI/CD workflows need to be redone"):
+1. Dispatch ONLY the affected subagent(s) — do NOT re-dispatch all three.
+2. Pass the user's PR review feedback as additional context in the task
+   description alongside the original Pipeline Document context.
+3. Preserve outputs of non-affected subagents — do NOT clear or re-dispatch them.
+4. After the re-dispatched subagent(s) complete, submit an updated PR.
 
 ### Full Regeneration
 When the user requests a full redo (e.g., "redo the whole thing from scratch",

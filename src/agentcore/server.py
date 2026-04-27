@@ -29,6 +29,14 @@ def _resolve_secrets():
         os.environ["ANTHROPIC_API_KEY"] = resp["SecretString"]
         logger.info("Resolved ANTHROPIC_API_KEY")
 
+    gh_arn = os.environ.get("GITHUB_TOKEN_SECRET_ARN", "")
+    if gh_arn and not os.environ.get("GITHUB_TOKEN"):
+        region = os.environ.get("AWS_REGION", "us-west-2")
+        client = boto3.client("secretsmanager", region_name=region)
+        resp = client.get_secret_value(SecretId=gh_arn)
+        os.environ["GITHUB_TOKEN"] = resp["SecretString"]
+        logger.info("Resolved GITHUB_TOKEN")
+
 
 async def _get_graph():
     """Lazy-build the agent graph."""
