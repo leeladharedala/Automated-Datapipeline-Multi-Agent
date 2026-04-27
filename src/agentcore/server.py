@@ -31,11 +31,14 @@ def _resolve_secrets():
 
     gh_arn = os.environ.get("GITHUB_TOKEN_SECRET_ARN", "")
     if gh_arn and not os.environ.get("GITHUB_TOKEN"):
-        region = os.environ.get("AWS_REGION", "us-west-2")
-        client = boto3.client("secretsmanager", region_name=region)
+        # Extract region from ARN (arn:aws:secretsmanager:<region>:...) so we
+        # call the correct endpoint even if the secret is in another region.
+        arn_parts = gh_arn.split(":")
+        secret_region = arn_parts[3] if len(arn_parts) > 3 and arn_parts[3] else os.environ.get("AWS_REGION", "us-west-2")
+        client = boto3.client("secretsmanager", region_name=secret_region)
         resp = client.get_secret_value(SecretId=gh_arn)
         os.environ["GITHUB_TOKEN"] = resp["SecretString"]
-        logger.info("Resolved GITHUB_TOKEN")
+        logger.info("Resolved GITHUB_TOKEN from %s", secret_region)
 
 
 async def _get_graph():

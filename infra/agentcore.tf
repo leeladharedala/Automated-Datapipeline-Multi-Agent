@@ -52,7 +52,7 @@ resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
     # GitHub — used by submit_pr tool to create PRs on a target repo
     GITHUB_REPO             = var.github_target_repo
     GITHUB_BASE_BRANCH      = var.github_base_branch
-    GITHUB_TOKEN_SECRET_ARN = var.github_token_secret_arn
+    GITHUB_TOKEN_SECRET_ARN = var.github_token_secret_arn != "" ? var.github_token_secret_arn : aws_secretsmanager_secret.github_pat.arn
   }
 
   lifecycle_configuration {
