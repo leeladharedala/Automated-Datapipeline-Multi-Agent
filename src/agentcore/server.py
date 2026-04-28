@@ -80,59 +80,97 @@ async def invocations(payload, context: RequestContext):
         dispatched_agents: dict[str, str] = {}  # tool_call_id → agent_name
         logger.info("Starting astream for session=%s", session_id)
 
-        async for event in graph.astream(
-            {"messages": [("user", user_query)]},
-            config=config,
-            stream_mode="messages",
-        ):
-            message_chunk, metadata = event
-            dumped = message_chunk.model_dump()
-            chunk_count += 1
+        # Use a queue + keepalive task so the stream never goes idle
+        # (idle streams cause BodyTimeoutError on the proxy side).
+        queue: asyncio.Queue = asyncio.Queue()
+        SENTINEL = object()
+        KEEPALIVE_INTERVAL = 15  # seconds
 
-            # Log the first few chunks to diagnose stream format
-            if chunk_count <= 5:
-                content_preview = str(dumped.get("content", ""))[:200]
-                logger.info(
-                    "Chunk #%d type=%s content_preview=%s tool_calls=%s",
-                    chunk_count,
-                    dumped.get("type", "unknown"),
-                    content_preview,
-                    bool(dumped.get("tool_calls")),
-                )
+        async def _stream_producer():
+            """Read graph.astream and push chunks into the queue."""
+            try:
+                async for event in graph.astream(
+                    {"messages": [("user", user_query)]},
+                    config=config,
+                    stream_mode="messages",
+                ):
+                    await queue.put(event)
+            except Exception as exc:
+                await queue.put(exc)
+            finally:
+                await queue.put(SENTINEL)
 
-            # --- Detect sub-agent dispatch (AIMessageChunk with tool_calls) ---
-            tool_calls = dumped.get("tool_calls") or []
-            for tc in tool_calls:
-                tc_name = tc.get("name", "")
-                if tc_name == "task":
-                    args = tc.get("args", {})
-                    agent_name = args.get("agent_name") or args.get("name", "")
-                    tc_id = tc.get("id", "")
+        async def _keepalive():
+            """Inject periodic heartbeat events to prevent stream timeouts."""
+            while True:
+                await asyncio.sleep(KEEPALIVE_INTERVAL)
+                await queue.put("__keepalive__")
+
+        producer_task = asyncio.create_task(_stream_producer())
+        keepalive_task = asyncio.create_task(_keepalive())
+
+        try:
+            while True:
+                item = await queue.get()
+                if item is SENTINEL:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                if item == "__keepalive__":
+                    yield {"__keepalive__": True}
+                    continue
+
+                message_chunk, metadata = item
+                dumped = message_chunk.model_dump()
+                chunk_count += 1
+
+                # Log the first few chunks to diagnose stream format
+                if chunk_count <= 5:
+                    content_preview = str(dumped.get("content", ""))[:200]
+                    logger.info(
+                        "Chunk #%d type=%s content_preview=%s tool_calls=%s",
+                        chunk_count,
+                        dumped.get("type", "unknown"),
+                        content_preview,
+                        bool(dumped.get("tool_calls")),
+                    )
+
+                # --- Detect sub-agent dispatch (AIMessageChunk with tool_calls) ---
+                tool_calls = dumped.get("tool_calls") or []
+                for tc in tool_calls:
+                    tc_name = tc.get("name", "")
+                    if tc_name == "task":
+                        args = tc.get("args", {})
+                        agent_name = args.get("agent_name") or args.get("name", "")
+                        tc_id = tc.get("id", "")
+                        if agent_name:
+                            dispatched_agents[tc_id] = agent_name
+                            logger.info("Sub-agent dispatched: %s → running", agent_name)
+                            yield {
+                                "__pipeline_status__": True,
+                                "dispatch_statuses": {agent_name: "running"},
+                            }
+
+                # --- Detect sub-agent completion (ToolMessage) ---
+                msg_type = dumped.get("type", "")
+                if msg_type == "tool":
+                    tc_id = dumped.get("tool_call_id", "")
+                    agent_name = dispatched_agents.get(tc_id, "")
                     if agent_name:
-                        dispatched_agents[tc_id] = agent_name
-                        logger.info("Sub-agent dispatched: %s → running", agent_name)
+                        result_text = str(dumped.get("content", ""))
+                        passed = "PASSED" in result_text.upper()
+                        status = "success" if passed else "failed"
+                        logger.info("Sub-agent completed: %s → %s", agent_name, status)
                         yield {
                             "__pipeline_status__": True,
-                            "dispatch_statuses": {agent_name: "running"},
+                            "dispatch_statuses": {agent_name: status},
+                            "accumulated_results": {agent_name: result_text[:500]},
                         }
 
-            # --- Detect sub-agent completion (ToolMessage) ---
-            msg_type = dumped.get("type", "")
-            if msg_type == "tool":
-                tc_id = dumped.get("tool_call_id", "")
-                agent_name = dispatched_agents.get(tc_id, "")
-                if agent_name:
-                    result_text = str(dumped.get("content", ""))
-                    passed = "PASSED" in result_text.upper()
-                    status = "success" if passed else "failed"
-                    logger.info("Sub-agent completed: %s → %s", agent_name, status)
-                    yield {
-                        "__pipeline_status__": True,
-                        "dispatch_statuses": {agent_name: status},
-                        "accumulated_results": {agent_name: result_text[:500]},
-                    }
-
-            yield dumped
+                yield dumped
+        finally:
+            keepalive_task.cancel()
+            await producer_task
 
         logger.info("Stream complete: yielded %d chunks", chunk_count)
 
