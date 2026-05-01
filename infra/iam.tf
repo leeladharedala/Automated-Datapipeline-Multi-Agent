@@ -129,7 +129,7 @@ data "aws_iam_policy_document" "secrets_read" {
     resources = compact([
       aws_secretsmanager_secret.anthropic_api_key.arn,
       aws_secretsmanager_secret.github_pat.arn,
-      var.github_token_secret_arn,
+      startswith(var.github_token_secret_arn, "arn:") ? var.github_token_secret_arn : "",
     ])
   }
 }
