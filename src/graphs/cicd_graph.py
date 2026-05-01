@@ -91,9 +91,14 @@ def _run_agent(system_prompt: str, user_message: str, model, backend=None) -> st
 
     Uses ainvoke (async) for consistency with other graphs and to support
     any async-only tools that may be added in the future.
+
+    Schedules work on the sandbox background loop via run_coroutine_threadsafe
+    to avoid "Event loop is closed" errors when httpx cleans up TLS connections
+    after asyncio.run() tears down a short-lived loop.
     """
     import asyncio
     from deepagents import create_deep_agent
+    from src.sandbox import _code_interpreter_cache
 
     kwargs = dict(model=model, system_prompt=system_prompt)
     if backend is not None:
@@ -105,19 +110,22 @@ def _run_agent(system_prompt: str, user_message: str, model, backend=None) -> st
     async def _ainvoke():
         return await agent.ainvoke({"messages": [HumanMessage(content=user_message)]})
 
-    # Run on the current event loop — node functions are async so there IS
-    # a running loop.  Fall back to a new loop only if called from sync context.
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
+    # Ensure a long-lived background loop exists.  Reuse the sandbox loop if
+    # already initialised, otherwise create a dedicated one for this module.
+    if "loop" not in _code_interpreter_cache:
+        import threading
+        _bg_loop = asyncio.new_event_loop()
 
-    if loop and loop.is_running():
-        # We're in an async context but called from a sync function.
-        # Use nest_asyncio to allow re-entrant event loop usage.
-        import nest_asyncio
-        nest_asyncio.apply(loop)
-        result = loop.run_until_complete(_ainvoke())
+        def _run_bg():
+            asyncio.set_event_loop(_bg_loop)
+            _bg_loop.run_forever()
+
+        threading.Thread(target=_run_bg, daemon=True).start()
+        _code_interpreter_cache["loop"] = _bg_loop
+
+    bg_loop = _code_interpreter_cache.get("loop")
+    if bg_loop is not None and bg_loop.is_running():
+        result = asyncio.run_coroutine_threadsafe(_ainvoke(), bg_loop).result()
     else:
         result = asyncio.run(_ainvoke())
 

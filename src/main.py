@@ -12,7 +12,6 @@ from deepagents import create_deep_agent, CompiledSubAgent
 from langchain_anthropic import ChatAnthropic
 from langgraph_checkpoint_aws import AgentCoreMemorySaver
 
-from src.checkpointer import ThrottledCheckpointSaver
 from src.prompts.orchestrator_prompt import ORCHESTRATOR_PROMPT
 from src.graphs import (
     build_iac_graph,
@@ -68,9 +67,13 @@ async def build_agent():
         ),
     ]
 
-    # Short-term memory: checkpoints (throttled to reduce CreateEvent API calls)
-    remote_saver = AgentCoreMemorySaver(memory_id=MEMORY_ID, region_name=REGION)
-    checkpointer = ThrottledCheckpointSaver(remote_saver, flush_interval=5)
+    # Short-term memory: use the remote saver directly for the orchestrator so
+    # every turn is persisted immediately.  The ThrottledCheckpointSaver is
+    # intentionally NOT used here — throttling caused the final checkpoint of
+    # a pipeline run to be skipped, leaving the next turn with no conversation
+    # history and causing the LLM to re-dispatch all subagents from scratch.
+    # Subagents run to completion in a single shot and don't need a checkpointer.
+    checkpointer = AgentCoreMemorySaver(memory_id=MEMORY_ID, region_name=REGION)
 
     # Pass tools directly — skip tracing wrappers to avoid
     # Pydantic v2 compatibility issues during agent compilation

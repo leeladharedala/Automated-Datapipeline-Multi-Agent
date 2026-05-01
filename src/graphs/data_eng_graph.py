@@ -79,7 +79,8 @@ missing required files.
 """
 
 
-def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend=None, ci_tools=None) -> str:
+def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend=None,
+               ci_tools=None, thread_id: str | None = None) -> str:
     """Create a mini DeepAgent, invoke it, and return the final AI message text.
 
     Extra tools (e.g. browser tools) are passed on top of the built-in
@@ -88,9 +89,21 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
 
     Uses ainvoke (async) to support tools that only implement async invocation
     (e.g. Code Interpreter StructuredTools from langchain-aws).
+
+    Always schedules work on the sandbox background loop via
+    run_coroutine_threadsafe so that:
+    1. CI tools' asyncio primitives (bound to that loop) are accessed from
+       their owning loop — no "bound to a different event loop" errors.
+    2. The loop is never closed between calls — no "Event loop is closed"
+       errors when httpx tries to clean up TLS connections after asyncio.run().
+
+    Pass thread_id to reuse the same Code Interpreter session across all
+    validate/fix calls within a single pipeline run, avoiding the overhead
+    of starting a new MicroVM session per invocation.
     """
     import asyncio
     from deepagents import create_deep_agent
+    from src.sandbox import _code_interpreter_cache
 
     kwargs = dict(
         model=model,
@@ -99,27 +112,54 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
     )
     if backend is not None:
         kwargs["backend"] = backend
-    kwargs["checkpointer"] = False  # FIX: disable checkpointing for inner agents
+    kwargs["checkpointer"] = False  # disable checkpointing for inner agents
 
     agent = create_deep_agent(**kwargs)
 
+    # Build a stable config so the Code Interpreter toolkit reuses the same
+    # MicroVM session for all validate/fix calls within a pipeline run.
+    # Without this, each ainvoke() gets a fresh auto-generated thread_id and
+    # the toolkit starts a new session every time.
+    invoke_config = None
+    if thread_id:
+        invoke_config = {"configurable": {"thread_id": thread_id}}
+
     async def _ainvoke():
+        if invoke_config:
+            return await agent.ainvoke(
+                {"messages": [HumanMessage(content=user_message)]},
+                config=invoke_config,
+            )
         return await agent.ainvoke({"messages": [HumanMessage(content=user_message)]})
 
-    # Run on the current event loop — use nest_asyncio to allow re-entrant
-    # event loop usage instead of creating a new loop (which causes
-    # "bound to a different event loop" errors with shared httpx clients).
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
+    # Ensure a long-lived background loop exists for scheduling work.
+    # We use the sandbox background loop if it's already been initialised
+    # (by get_code_interpreter_tools()), otherwise create a dedicated one
+    # for this graph module so we never fall back to asyncio.run().
+    #
+    # IMPORTANT: We always use the background loop — never asyncio.run().
+    # asyncio.run() creates a new event loop, runs the coroutine, then closes
+    # the loop. When httpx cleans up TLS connections after the coroutine
+    # completes, it calls loop.call_soon() on the now-closed loop, raising
+    # "RuntimeError: Event loop is closed". The background loop stays open
+    # for the lifetime of the process, so httpx cleanup always succeeds.
+    if "loop" not in _code_interpreter_cache:
+        import threading
+        _ready = threading.Event()
+        _bg_loop = asyncio.new_event_loop()
 
-    if loop and loop.is_running():
-        import nest_asyncio
-        nest_asyncio.apply(loop)
-        result = loop.run_until_complete(_ainvoke())
-    else:
-        result = asyncio.run(_ainvoke())
+        def _run_bg():
+            asyncio.set_event_loop(_bg_loop)
+            _bg_loop.call_soon_threadsafe(_ready.set)
+            _bg_loop.run_forever()
+
+        threading.Thread(target=_run_bg, daemon=True).start()
+        _ready.wait(timeout=5)  # wait until run_forever() is actually running
+        _code_interpreter_cache["loop"] = _bg_loop
+
+    bg_loop = _code_interpreter_cache["loop"]
+    # Always schedule on the background loop — never use asyncio.run().
+    result = asyncio.run_coroutine_threadsafe(_ainvoke(), bg_loop).result()
 
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
@@ -354,7 +394,7 @@ Report the full output. State clearly whether validation PASSED or FAILED.
 """
 
 
-def _validate(state: DataEngState, model, ci_tools=None) -> dict[str, Any]:
+def _validate(state: DataEngState, model, ci_tools=None, thread_id: str | None = None) -> dict[str, Any]:
     """Agent node: use Code Interpreter tools to run pytest validation.
 
     Uses execute_code/execute_command from the Code Interpreter toolkit
@@ -374,7 +414,8 @@ def _validate(state: DataEngState, model, ci_tools=None) -> dict[str, Any]:
             "agent.node": "validate",
             "agent.artifact_count": len(artifacts),
         }):
-            response = _run_agent(_VALIDATE_PROMPT, user_msg, model, tools=ci_tools, ci_tools=ci_tools)
+            response = _run_agent(_VALIDATE_PROMPT, user_msg, model, tools=ci_tools,
+                                  ci_tools=ci_tools, thread_id=thread_id)
     except Exception as exc:
         response = str(exc)
 
@@ -399,7 +440,7 @@ def _validate(state: DataEngState, model, ci_tools=None) -> dict[str, Any]:
     }
 
 
-def _fix(state: DataEngState, model, tools: list, ci_tools=None) -> dict[str, Any]:
+def _fix(state: DataEngState, model, tools: list, ci_tools=None, thread_id: str | None = None) -> dict[str, Any]:
     """Agent node: fix pytest failures using Code Interpreter + browser tools."""
     attempt = state.get("attempt", 0) + 1
     error_output = state.get("validation_output", "")
@@ -424,7 +465,8 @@ def _fix(state: DataEngState, model, tools: list, ci_tools=None) -> dict[str, An
         "agent.attempt": attempt,
         "agent.tool_count": len(tools),
     }):
-        response = _run_agent(_FIX_PROMPT, user_msg, model, tools=tools, ci_tools=ci_tools)
+        response = _run_agent(_FIX_PROMPT, user_msg, model, tools=tools, ci_tools=ci_tools,
+                              thread_id=thread_id)
 
     return {"attempt": attempt, "messages": [AIMessage(content=response)]}
 
@@ -478,6 +520,7 @@ def build_data_eng_graph(model, tools=None):
     Returns:
         A compiled LangGraph StateGraph ready for invocation as a CompiledSubAgent.
     """
+    import uuid
     browser_tools = tools or []
 
     # Load Code Interpreter tools for validate/fix nodes (execute_code,
@@ -485,6 +528,11 @@ def build_data_eng_graph(model, tools=None):
     from src.sandbox import get_code_interpreter_tools, get_local_shell_backend
     ci_tools = get_code_interpreter_tools()
     sandbox = get_local_shell_backend()
+
+    # Stable thread_id for this pipeline run — ensures all validate/fix calls
+    # reuse the same Code Interpreter MicroVM session instead of starting a
+    # new one per invocation (which adds ~1s latency each time).
+    ci_thread_id = f"data-eng-{uuid.uuid4()}"
 
     graph = StateGraph(DataEngState)
 
@@ -495,10 +543,11 @@ def build_data_eng_graph(model, tools=None):
         return _generate(state, model, browser_tools)
 
     def validate(state: DataEngState) -> dict[str, Any]:
-        return _validate(state, model, ci_tools=ci_tools)
+        return _validate(state, model, ci_tools=ci_tools, thread_id=ci_thread_id)
 
     def fix(state: DataEngState) -> dict[str, Any]:
-        return _fix(state, model, browser_tools + ci_tools, ci_tools=ci_tools)
+        return _fix(state, model, browser_tools + ci_tools, ci_tools=ci_tools,
+                    thread_id=ci_thread_id)
 
     def report(state: DataEngState) -> dict[str, Any]:
         return _report(state)

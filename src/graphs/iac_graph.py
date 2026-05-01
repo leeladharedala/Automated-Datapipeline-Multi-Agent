@@ -113,7 +113,8 @@ You will receive the validation error output. Your job:
 
 
 
-def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend=None) -> str:
+def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend=None,
+               _bg_loop_cache: dict | None = None) -> str:
     """Create a mini DeepAgent, invoke it, and return the final AI message text.
 
     This gives the agent access to the full DeepAgent tool stack:
@@ -123,6 +124,10 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
 
     Uses ainvoke (async) to support tools that only implement async invocation
     (e.g. MCP StructuredTools from langchain-mcp-adapters).
+
+    Schedules work on a long-lived background loop (passed via _bg_loop_cache)
+    when available, to avoid "Event loop is closed" errors from httpx cleanup
+    after asyncio.run() tears down a short-lived loop.
     """
     import asyncio
     from deepagents import create_deep_agent
@@ -134,25 +139,18 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
     )
     if backend is not None:
         kwargs["backend"] = backend
-    kwargs["checkpointer"] = False  # FIX: disable checkpointing for inner agents
+    kwargs["checkpointer"] = False  # disable checkpointing for inner agents
 
     agent = create_deep_agent(**kwargs)
 
     async def _ainvoke():
         return await agent.ainvoke({"messages": [HumanMessage(content=user_message)]})
 
-    # Run on the current event loop — use nest_asyncio to allow re-entrant
-    # event loop usage instead of creating a new loop (which causes
-    # "bound to a different event loop" errors with shared httpx clients).
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop and loop.is_running():
-        import nest_asyncio
-        nest_asyncio.apply(loop)
-        result = loop.run_until_complete(_ainvoke())
+    # Use the caller-supplied background loop when available so that the loop
+    # is never closed between calls (avoids httpx TLS cleanup errors).
+    bg_loop = (_bg_loop_cache or {}).get("loop")
+    if bg_loop is not None and bg_loop.is_running():
+        result = asyncio.run_coroutine_threadsafe(_ainvoke(), bg_loop).result()
     else:
         result = asyncio.run(_ainvoke())
 
@@ -223,11 +221,12 @@ def _research(state: IaCState, model, tools_cache: dict) -> dict[str, Any]:
             f"## Task\n{task}\n\nResearch the AWS resources and Terraform configuration needed for this task.",
             model,
             tools=active_tools,
+            _bg_loop_cache=tools_cache,
         )
     return {"research_context": response, "messages": [AIMessage(content=response)]}
 
 
-def _generate(state: IaCState, model) -> dict[str, Any]:
+def _generate(state: IaCState, model, _bg_loop_cache: dict | None = None) -> dict[str, Any]:
     """Agent node: create_deep_agent with write_file to generate Terraform files."""
     task = get_task_description(state)
     research = state.get("research_context", "")
@@ -239,7 +238,7 @@ def _generate(state: IaCState, model) -> dict[str, Any]:
         "agent.role": "code_generator",
         "agent.research_context_length": len(research),
     }):
-        response = _run_agent(_GENERATE_PROMPT, user_msg, model)
+        response = _run_agent(_GENERATE_PROMPT, user_msg, model, _bg_loop_cache=_bg_loop_cache)
 
     # Track the expected artifact filenames
     tf_artifacts = {
@@ -251,7 +250,7 @@ def _generate(state: IaCState, model) -> dict[str, Any]:
     return {"tf_artifacts": tf_artifacts, "messages": [AIMessage(content=response)]}
 
 
-def _validate(state: IaCState, model, sandbox=None) -> dict[str, Any]:
+def _validate(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None = None) -> dict[str, Any]:
     """Agent node: run terraform plan and have LLM verify planned resources."""
     task = get_task_description(state)
     research = state.get("research_context", "")
@@ -269,7 +268,8 @@ def _validate(state: IaCState, model, sandbox=None) -> dict[str, Any]:
         "agent.node": "validate",
         "agent.role": "validator",
     }):
-        response = _run_agent(_VALIDATE_PROMPT, user_msg, model, backend=sandbox)
+        response = _run_agent(_VALIDATE_PROMPT, user_msg, model, backend=sandbox,
+                              _bg_loop_cache=_bg_loop_cache)
 
     # Check for explicit PASSED/FAILED keywords from the prompt.
     # Avoid matching generic "success" which can appear in failure context.
@@ -287,7 +287,7 @@ def _validate(state: IaCState, model, sandbox=None) -> dict[str, Any]:
     }
 
 
-def _fix(state: IaCState, model, sandbox=None) -> dict[str, Any]:
+def _fix(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None = None) -> dict[str, Any]:
     """Agent node: create_deep_agent with edit_file to fix broken Terraform files."""
     attempt = state.get("attempt", 0) + 1
     error_output = state.get("validation_output", "")
@@ -304,7 +304,8 @@ def _fix(state: IaCState, model, sandbox=None) -> dict[str, Any]:
         "agent.role": "debugger",
         "agent.attempt": attempt,
     }):
-        response = _run_agent(_FIX_PROMPT, user_msg, model, backend=sandbox)
+        response = _run_agent(_FIX_PROMPT, user_msg, model, backend=sandbox,
+                              _bg_loop_cache=_bg_loop_cache)
 
     return {"attempt": attempt, "messages": [AIMessage(content=response)]}
 
@@ -372,13 +373,13 @@ def build_iac_graph(model, tools=None):
         return _research(state, model, _cached_tools)
 
     def generate(state: IaCState) -> dict[str, Any]:
-        return _generate(state, model)
+        return _generate(state, model, _cached_tools)
 
     def validate(state: IaCState) -> dict[str, Any]:
-        return _validate(state, model, sandbox=sandbox)
+        return _validate(state, model, sandbox=sandbox, _bg_loop_cache=_cached_tools)
 
     def fix(state: IaCState) -> dict[str, Any]:
-        return _fix(state, model, sandbox=sandbox)
+        return _fix(state, model, sandbox=sandbox, _bg_loop_cache=_cached_tools)
 
     def report(state: IaCState) -> dict[str, Any]:
         return _report(state)
