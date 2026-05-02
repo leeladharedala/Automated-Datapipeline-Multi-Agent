@@ -37,12 +37,16 @@ DEFAULT_SAMPLE_SIZE = 100
 # --- System prompts for agent nodes ---
 
 _GENERATE_PROMPT = """\
-You are a data transformation code generator. You have access to write_file, \
-read_file tools that write to a shared VFS (persisted by AgentCore Memory), \
-and browser tools for looking up framework documentation on-demand.
+You are a data transformation code generator. You have access to write_files \
+(Code Interpreter tool that writes files into the MicroVM filesystem) and \
+browser tools for looking up framework documentation on-demand.
+
+IMPORTANT: Use write_files (plural, Code Interpreter tool) to write files — \
+NOT the singular VFS tool. Files must land in the Code Interpreter MicroVM \
+filesystem so the validator can find them.
 
 Given the task description below, generate production-grade PySpark data \
-transformation code. Write the following files using write_file:
+transformation code. Write the following files using write_files:
 - /src/transformations/transform.py — Core PySpark DataFrame transformation logic
 - /src/transformations/__init__.py — Package init (import the main transform)
 
@@ -63,15 +67,15 @@ Write ALL files, then respond with a summary of what you wrote.
 """
 
 _FIX_PROMPT = """\
-You are a data engineering debugging expert. You have access to read_file, \
-edit_file tools that operate on a shared VFS, and browser tools for looking \
-up framework documentation on-demand.
+You are a data engineering debugging expert. You have access to execute_code \
+and write_files (Code Interpreter tools that operate on the MicroVM filesystem), \
+and browser tools for looking up framework documentation on-demand.
 
 You will receive the validation failure output. Your job:
-1. Read the broken file(s) using read_file
+1. Read the broken file(s) using execute_code (e.g. run: open('/src/transformations/transform.py').read())
 2. Analyze the error and identify the root cause
 3. If unsure about an API or behavior, use the browser tool to look up docs
-4. Fix ONLY the broken file(s) using edit_file — do not regenerate everything
+4. Fix ONLY the broken file(s) using write_files — do not regenerate everything
 5. Respond with a summary of what you fixed and why
 
 Common issues: missing main() entry point, syntax errors, missing pyspark imports, \
@@ -284,8 +288,9 @@ def _sample_data(state: DataEngState, model, backend=None, ci_tools=None) -> dic
         return {"inferred_schema": {}, "data_sample_status": "failed"}
 
 
-def _generate(state: DataEngState, model, tools: list) -> dict[str, Any]:
-    """Agent node: create_deep_agent with write_file + browser tools to generate code."""
+def _generate(state: DataEngState, model, tools: list,
+              ci_tools=None, thread_id: str | None = None) -> dict[str, Any]:
+    """Agent node: create_deep_agent with write_files (CI) + browser tools to generate code."""
     task = get_task_description(state)
     inferred_schema = state.get("inferred_schema", {})
 
@@ -315,7 +320,8 @@ def _generate(state: DataEngState, model, tools: list) -> dict[str, Any]:
         "agent.has_schema": bool(inferred_schema and inferred_schema.get("columns")),
         "agent.tool_count": len(tools),
     }):
-        response = _run_agent(_GENERATE_PROMPT, user_msg, model, tools=tools)
+        response = _run_agent(_GENERATE_PROMPT, user_msg, model, tools=tools,
+                              ci_tools=ci_tools, thread_id=thread_id)
 
     code_artifacts = {
         "transform.py": "/src/transformations/transform.py",
@@ -540,7 +546,8 @@ def build_data_eng_graph(model, tools=None):
         return _sample_data(state, model)
 
     def generate(state: DataEngState) -> dict[str, Any]:
-        return _generate(state, model, browser_tools)
+        return _generate(state, model, browser_tools + ci_tools,
+                         ci_tools=ci_tools, thread_id=ci_thread_id)
 
     def validate(state: DataEngState) -> dict[str, Any]:
         return _validate(state, model, ci_tools=ci_tools, thread_id=ci_thread_id)
