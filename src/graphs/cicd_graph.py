@@ -219,18 +219,31 @@ def _report(state: CICDState) -> dict[str, Any]:
 
     files_list = ", ".join(artifacts.keys()) if artifacts else "none"
 
+    # Read the actual file content from the VFS so the orchestrator can
+    # include it in followup task descriptions for selective re-dispatch.
+    file_contents = ""
+    for fname, fpath in artifacts.items():
+        try:
+            with open(fpath) as f:
+                content = f.read()
+            file_contents += f"\n\n### {fname}\n```yaml\n{content}\n```"
+        except Exception:
+            file_contents += f"\n\n### {fname}\n(content unavailable)"
+
     if passed:
         report = (
             "VALIDATION: PASSED\n"
             "actionlint completed successfully.\n"
             f"Files generated: {files_list}\n"
             f"Attempts used: {attempt}"
+            f"{file_contents}"
         )
     else:
         report = (
             f"VALIDATION: FAILED ({attempt}/{max_attempts} attempts exhausted)\n\n"
             f"LAST ERROR:\n{validation_output}\n\n"
             f"Files generated: {files_list}"
+            f"{file_contents}"
         )
 
     return {

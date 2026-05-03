@@ -17,6 +17,8 @@ from src.graphs import (
     build_iac_graph,
     build_cicd_graph,
     build_data_eng_graph,
+    OrchestratorMiddleware,
+    OrchestratorState,
 )
 from src.tools.gateway import load_gateway_tools
 from src.tools.submit_pr import submit_pr
@@ -83,6 +85,8 @@ async def build_agent():
         subagents=subagents,
         tools=[submit_pr, parse_document_tool],
         checkpointer=checkpointer,
+        middleware=[OrchestratorMiddleware()],
+        state_schema=OrchestratorState,
     )
 
     return agent

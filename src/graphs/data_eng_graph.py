@@ -36,50 +36,58 @@ DEFAULT_SAMPLE_SIZE = 100
 
 # --- System prompts for agent nodes ---
 
-_GENERATE_PROMPT = """\
-You are a data transformation code generator. You have access to write_files \
-(Code Interpreter tool that writes files into the MicroVM filesystem) and \
-browser tools for looking up framework documentation on-demand.
-
-IMPORTANT: Use write_files (plural, Code Interpreter tool) to write files — \
-NOT the singular VFS tool. Files must land in the Code Interpreter MicroVM \
-filesystem so the validator can find them.
-
-Given the task description below, generate production-grade PySpark data \
-transformation code. Write the following files using write_files:
-- /src/transformations/transform.py — Core PySpark DataFrame transformation logic
-- /src/transformations/__init__.py — Package init (import the main transform)
-
-TRANSFORMATION CODE rules:
-- Use PySpark DataFrames for ALL transformations (read from and write to S3 paths).
-- Structure transforms as pure functions: input DataFrame(s) in, output DataFrame out.
-- Handle nulls explicitly — use .na.drop(), .na.fill(), or .when(col.isNull(), ...) as appropriate.
-- Use .select() and .withColumn() over .map()/.rdd — stay in the DataFrame API for Catalyst optimization.
-- Avoid collect() or toPandas() on large datasets — keep everything distributed.
-- Add proper column type casting (e.g., .cast("timestamp")) rather than relying on inference.
-- Use partitionBy on writes for efficient downstream reads (partition by date, region, etc.).
-- Write output as Parquet with snappy compression (default) unless task specifies otherwise.
-- Include a main() entry point that accepts input/output S3 paths as arguments for CLI invocation.
-- Add logging with Python's logging module, not print statements.
-- If unsure about PySpark API details, use the browser tool to look up official docs.
-
-Write ALL files, then respond with a summary of what you wrote.
-"""
+_GENERATE_PROMPT = (
+    "You are a data transformation code generator. You have access to browser tools "
+    "for looking up framework documentation on-demand.\n\n"
+    "Generate production-grade PySpark data transformation code for the task below. "
+    "Respond with EXACTLY two fenced code blocks:\n\n"
+    "```python:transform.py\n"
+    "<full content of transform.py here>\n"
+    "```\n\n"
+    "```python:__init__.py\n"
+    "<full content of __init__.py here, can be empty>\n"
+    "```\n\n"
+    "TRANSFORMATION CODE rules:\n"
+    "- Use PySpark DataFrames for ALL transformations (read from and write to S3 paths).\n"
+    "- Structure transforms as pure functions: input DataFrame(s) in, output DataFrame out.\n"
+    "- Handle nulls explicitly with .na.drop(), .na.fill(), or .when(col.isNull(), ...).\n"
+    "- Use .select() and .withColumn() over .map()/.rdd.\n"
+    "- Avoid collect() or toPandas() on large datasets.\n"
+    "- Add proper column type casting (e.g., .cast('timestamp')).\n"
+    "- Use partitionBy on writes for efficient downstream reads.\n"
+    "- Write output as Parquet with snappy compression unless task specifies otherwise.\n"
+    "- Include a main() entry point that accepts input/output S3 paths as arguments.\n"
+    "- Add logging with Python's logging module, not print statements.\n"
+    "- If unsure about PySpark API details, use the browser tool to look up official docs.\n"
+)
 
 _FIX_PROMPT = """\
 You are a data engineering debugging expert. You have access to execute_code \
-and write_files (Code Interpreter tools that operate on the MicroVM filesystem), \
-and browser tools for looking up framework documentation on-demand.
+(Code Interpreter tool) and browser tools.
+
+The files are already in /src/transformations/ in the MicroVM. \
+Use execute_code to read and fix them:
+
+To read: execute_code with: print(open('/src/transformations/transform.py').read())
+To fix:  execute_code with: open('/src/transformations/transform.py', 'w').write(new_code)
+
+After fixing, respond with the corrected file content in fenced code blocks:
+
+```python:transform.py
+<corrected transform.py content>
+```
+
+```python:__init__.py
+<corrected __init__.py content>
+```
 
 You will receive the validation failure output. Your job:
-1. Read the broken file(s) using execute_code (e.g. run: open('/src/transformations/transform.py').read())
+1. Read the broken file(s) using execute_code
 2. Analyze the error and identify the root cause
-3. If unsure about an API or behavior, use the browser tool to look up docs
-4. Fix ONLY the broken file(s) using write_files — do not regenerate everything
-5. Respond with a summary of what you fixed and why
+3. Fix ONLY the broken file(s) using execute_code
+4. Respond with the corrected content in the fenced blocks above
 
-Common issues: missing main() entry point, syntax errors, missing pyspark imports, \
-missing required files.
+Common issues: missing main() entry point, syntax errors, missing pyspark imports.
 """
 
 
@@ -288,9 +296,48 @@ def _sample_data(state: DataEngState, model, backend=None, ci_tools=None) -> dic
         return {"inferred_schema": {}, "data_sample_status": "failed"}
 
 
+def _parse_code_blocks(response: str) -> dict[str, str]:
+    """Extract named fenced code blocks from the generate response.
+
+    Looks for blocks like:
+      ```python:transform.py
+      <content>
+      ```
+    Returns a dict of {filename: content}.
+    Falls back to extracting the first two plain ```python blocks if
+    named blocks are not found.
+    """
+    import re as _re
+    content: dict[str, str] = {}
+
+    # Try named blocks first: ```python:filename.py
+    named = _re.findall(r"```(?:python:)?([\w./]+\.py)\n(.*?)```", response, _re.DOTALL)
+    for fname, code in named:
+        # Strip the leading "python:" prefix if present in the filename match
+        fname = fname.lstrip("python:")
+        content[fname] = code.strip()
+
+    if "transform.py" in content:
+        return content
+
+    # Fallback: grab all plain ```python blocks in order
+    plain = _re.findall(r"```(?:python)?\n(.*?)```", response, _re.DOTALL)
+    if plain:
+        content["transform.py"] = plain[0].strip()
+    if len(plain) > 1:
+        content["__init__.py"] = plain[1].strip()
+
+    return content
+
+
 def _generate(state: DataEngState, model, tools: list,
               ci_tools=None, thread_id: str | None = None) -> dict[str, Any]:
-    """Agent node: create_deep_agent with write_files (CI) + browser tools to generate code."""
+    """Agent node: pure LLM code generation — no Code Interpreter needed.
+
+    The generated code is stored in state['code_content'] as a dict of
+    {filename: content}. The validate node reads this and writes the files
+    into the MicroVM via execute_code before running the structural check.
+    """
     task = get_task_description(state)
     inferred_schema = state.get("inferred_schema", {})
 
@@ -320,24 +367,28 @@ def _generate(state: DataEngState, model, tools: list,
         "agent.has_schema": bool(inferred_schema and inferred_schema.get("columns")),
         "agent.tool_count": len(tools),
     }):
-        response = _run_agent(_GENERATE_PROMPT, user_msg, model, tools=tools,
-                              ci_tools=ci_tools, thread_id=thread_id)
+        # Generate uses only browser tools — no Code Interpreter needed.
+        # The code is returned as text and stored in state for the validate node.
+        response = _run_agent(_GENERATE_PROMPT, user_msg, model, tools=tools)
 
+    code_content = _parse_code_blocks(response)
     code_artifacts = {
         "transform.py": "/src/transformations/transform.py",
         "__init__.py": "/src/transformations/__init__.py",
     }
-    return {"code_artifacts": code_artifacts, "messages": [AIMessage(content=response)]}
+    return {
+        "code_artifacts": code_artifacts,
+        "code_content": code_content,
+        "messages": [AIMessage(content=response)],
+    }
 
 
 _VALIDATE_PROMPT = """\
-You are a code structure validator. You have access to the execute tool \
-which runs commands in the AgentCore Runtime sandbox.
+You are a code structure validator. You have access to execute_code \
+(Code Interpreter tool) which runs Python in an isolated MicroVM sandbox.
 
-Validate the generated PySpark transformation code by running a structural \
-check script. Do NOT attempt to run PySpark — it is not available in this sandbox.
-
-Run the following validation script using the execute tool:
+The generated code has already been written to /src/transformations/ in the \
+MicroVM. Run the following validation script using execute_code:
 
 ```python
 import ast, sys, os
@@ -345,13 +396,11 @@ import ast, sys, os
 errors = []
 func_names = []
 
-# 1. Check required files exist
 required = ["/src/transformations/transform.py", "/src/transformations/__init__.py"]
 for f in required:
     if not os.path.exists(f):
         errors.append(f"MISSING: {f}")
 
-# 2. Parse transform.py for syntax and structure
 tf = "/src/transformations/transform.py"
 if os.path.exists(tf):
     source = open(tf).read()
@@ -360,14 +409,12 @@ if os.path.exists(tf):
     except SyntaxError as e:
         errors.append(f"SYNTAX ERROR in transform.py: {e}")
         tree = None
-
     if tree:
         func_names = [n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
         if not func_names:
             errors.append("NO FUNCTIONS found in transform.py")
         if "main" not in func_names:
             errors.append("MISSING main() entry point in transform.py")
-
         imports = [n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]
         has_pyspark = any(
             (isinstance(n, ast.ImportFrom) and n.module and "pyspark" in n.module)
@@ -377,7 +424,6 @@ if os.path.exists(tf):
         if not has_pyspark:
             errors.append("NO pyspark imports found - expected PySpark DataFrame code")
 
-# 3. Parse __init__.py for syntax
 init = "/src/transformations/__init__.py"
 if os.path.exists(init):
     try:
@@ -401,17 +447,41 @@ Report the full output. State clearly whether validation PASSED or FAILED.
 
 
 def _validate(state: DataEngState, model, ci_tools=None, thread_id: str | None = None) -> dict[str, Any]:
-    """Agent node: use Code Interpreter tools to run pytest validation.
+    """Agent node: write generated code into MicroVM then run structural validation.
 
-    Uses execute_code/execute_command from the Code Interpreter toolkit
-    to run pytest in an isolated MicroVM sandbox.
+    The generate node stores code as text in state['code_content'].
+    We write those files into the MicroVM via execute_code before running
+    the validation script — this bridges the filesystem gap between the
+    generate node (pure LLM, no Code Interpreter) and the MicroVM.
     """
+    code_content = state.get("code_content", {})
     artifacts = state.get("code_artifacts", {})
-    files_list = ", ".join(artifacts.values()) if artifacts else "unknown"
+
+    # Build a Python snippet that writes the generated files into the MicroVM.
+    # This runs as the first execute_code call so the validation script finds them.
+    transform_code = code_content.get("transform.py", "")
+    init_code = code_content.get("__init__.py", "")
+
+    # Escape backslashes and triple-quotes so the content embeds safely
+    def _escape(s: str) -> str:
+        return s.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
+
+    setup_code = (
+        "import os\n"
+        "os.makedirs('/src/transformations', exist_ok=True)\n"
+        f'with open("/src/transformations/transform.py", "w") as f:\n'
+        f'    f.write("""{_escape(transform_code)}""")\n'
+        f'with open("/src/transformations/__init__.py", "w") as f:\n'
+        f'    f.write("""{_escape(init_code)}""")\n'
+        "print('Files written to /src/transformations/')\n"
+        "print(os.listdir('/src/transformations/'))\n"
+    )
 
     user_msg = (
-        f"## Generated Files\n{files_list}\n\n"
-        "Run pytest validation now."
+        f"## Step 1: Write generated files into the MicroVM\n"
+        f"Run this exact Python code using execute_code:\n```python\n{setup_code}\n```\n\n"
+        f"## Step 2: Run the validation script\n"
+        f"After the files are written, run the validation script from the prompt."
     )
 
     try:
@@ -419,6 +489,7 @@ def _validate(state: DataEngState, model, ci_tools=None, thread_id: str | None =
             "agent.graph": "data_eng",
             "agent.node": "validate",
             "agent.artifact_count": len(artifacts),
+            "agent.has_code_content": bool(code_content),
         }):
             response = _run_agent(_VALIDATE_PROMPT, user_msg, model, tools=ci_tools,
                                   ci_tools=ci_tools, thread_id=thread_id)
@@ -426,9 +497,6 @@ def _validate(state: DataEngState, model, ci_tools=None, thread_id: str | None =
         response = str(exc)
 
     output = response
-
-    # Check for explicit pytest result markers.
-    # pytest output contains "X passed" and/or "X failed" — check both.
     upper = output.upper()
     if "VALIDATION FAILED" in upper or "VALIDATION: FAILED" in upper:
         passed = False
@@ -462,7 +530,8 @@ def _fix(state: DataEngState, model, tools: list, ci_tools=None, thread_id: str 
         user_msg += "## Inferred Schema\n" + "\n".join(schema_lines) + "\n\n"
     user_msg += (
         f"## Pytest Failure (attempt {attempt})\n{error_output}\n\n"
-        "Fix the broken transformation or test files in /src/transformations/ and /tests/."
+        "Fix the broken transformation files in /src/transformations/ using execute_code, "
+        "then respond with the corrected content in fenced code blocks as instructed."
     )
     with traced_span("agent:data_eng.fix", {
         "agent.graph": "data_eng",
@@ -474,7 +543,16 @@ def _fix(state: DataEngState, model, tools: list, ci_tools=None, thread_id: str 
         response = _run_agent(_FIX_PROMPT, user_msg, model, tools=tools, ci_tools=ci_tools,
                               thread_id=thread_id)
 
-    return {"attempt": attempt, "messages": [AIMessage(content=response)]}
+    # Parse corrected code blocks from the fix response and update code_content in state
+    fixed_content = _parse_code_blocks(response)
+    current_content = state.get("code_content", {})
+    updated_content = {**current_content, **fixed_content}
+
+    return {
+        "attempt": attempt,
+        "code_content": updated_content,
+        "messages": [AIMessage(content=response)],
+    }
 
 
 def _report(state: DataEngState) -> dict[str, Any]:
@@ -484,8 +562,16 @@ def _report(state: DataEngState) -> dict[str, Any]:
     max_attempts = state.get("max_attempts", 3)
     validation_output = state.get("validation_output", "")
     artifacts = state.get("code_artifacts", {})
+    code_content = state.get("code_content", {})
 
     files_list = ", ".join(artifacts.keys()) if artifacts else "none"
+
+    # Include the actual generated code so the orchestrator can pass it back
+    # on followup/re-dispatch requests without needing to regenerate from scratch.
+    file_contents = ""
+    for fname, content in code_content.items():
+        if content:
+            file_contents += f"\n\n### {fname}\n```python\n{content}\n```"
 
     if passed:
         report = (
@@ -493,12 +579,14 @@ def _report(state: DataEngState) -> dict[str, Any]:
             "pytest completed successfully.\n"
             f"Files generated: {files_list}\n"
             f"Attempts used: {attempt}"
+            f"{file_contents}"
         )
     else:
         report = (
             f"VALIDATION: FAILED ({attempt}/{max_attempts} attempts exhausted)\n\n"
             f"LAST ERROR:\n{validation_output}\n\n"
             f"Files generated: {files_list}"
+            f"{file_contents}"
         )
 
     return {
@@ -546,8 +634,9 @@ def build_data_eng_graph(model, tools=None):
         return _sample_data(state, model)
 
     def generate(state: DataEngState) -> dict[str, Any]:
-        return _generate(state, model, browser_tools + ci_tools,
-                         ci_tools=ci_tools, thread_id=ci_thread_id)
+        # Generate is pure LLM + browser tools — no Code Interpreter needed.
+        # Code content is stored in state and written to MicroVM by validate.
+        return _generate(state, model, browser_tools)
 
     def validate(state: DataEngState) -> dict[str, Any]:
         return _validate(state, model, ci_tools=ci_tools, thread_id=ci_thread_id)

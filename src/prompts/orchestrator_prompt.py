@@ -21,6 +21,11 @@ When the user describes a pipeline in free-form text (no structured document):
    - Do NOT wait for one to finish before starting the next.
 3. After all three subagents return, review the generated files.
 4. Use `submit_pr` to commit all files and open a Pull Request.
+   - Extract file content from each subagent's report (the fenced code blocks).
+   - Pass ALL files as the `files` dict: IaC .tf files, CI/CD .yml files, and
+     data-eng .py files together in a single `submit_pr` call.
+   - Use the file paths as keys (e.g. "infra/main.tf", ".github/workflows/deploy.yml",
+     "src/transformations/transform.py") and the code block content as values.
 5. Return the PR link to the user.
 
 ### New Pipeline Request — Document-Driven Mode
@@ -47,6 +52,11 @@ When the user submits a structured Pipeline Document (JSON or YAML containing
 5. If any subagent returned FAILED, include the failure details in the summary
    and prompt the user for a remediation decision.
 6. Use `submit_pr` to commit all files and open a Pull Request.
+   - Extract file content from each subagent's report (the fenced code blocks).
+   - Pass ALL files as the `files` dict in a single `submit_pr` call:
+     - IaC files: "infra/provider.tf", "infra/variables.tf", "infra/main.tf", "infra/outputs.tf"
+     - CI/CD files: ".github/workflows/deploy.yml", ".github/workflows/destroy.yml"
+     - Data-eng files: "src/transformations/transform.py", "src/transformations/__init__.py"
 
 ### Follow-Up Q&A
 When the user sends a follow-up message that is a question (not a modification
@@ -68,6 +78,9 @@ When the user asks to submit a PR (e.g., "submit a PR", "create the PR",
 "open a pull request", "push the code"):
 - Call `submit_pr` directly with the already-generated files from
   `accumulated_results`. Do NOT re-dispatch any subagents.
+- Extract the file content from the fenced code blocks in each subagent's
+  report in `accumulated_results`. Use the file paths as keys and the code
+  block content as values in the `files` dict.
 - The pipeline has already completed — the artifacts are ready to commit.
 
 **Failed Tool Retry:**
@@ -89,6 +102,10 @@ the IaC part with a different VPC setup"):
    - Pass the user's modification instructions along with the original Pipeline
      Document context (from `pipeline_metadata["pipeline_document"]`) in the
      task description.
+   - IMPORTANT: Also include the previously generated code from
+     `accumulated_results` for that subagent so it can modify the existing
+     code rather than regenerating from scratch. For example:
+     "Here is the previously generated transform.py: <code>. Modify it to..."
    - If multiple subagents are affected, dispatch them in parallel.
 3. Preserve the outputs of non-affected subagents — do NOT clear or re-dispatch them.
 4. After the re-dispatched subagent(s) complete, present an updated summary report.
@@ -101,8 +118,12 @@ component (e.g., "regenerate just the Terraform", "redo the data-eng code",
 1. Dispatch ONLY the affected subagent(s) — do NOT re-dispatch all three.
 2. Pass the user's PR review feedback as additional context in the task
    description alongside the original Pipeline Document context.
-3. Preserve outputs of non-affected subagents — do NOT clear or re-dispatch them.
-4. After the re-dispatched subagent(s) complete, submit an updated PR.
+3. IMPORTANT: Include the previously generated code from `accumulated_results`
+   for that subagent so it can modify the existing code rather than starting
+   from scratch. For example: "Here is the current transform.py: <code>. The
+   PR review feedback is: <feedback>. Please update accordingly."
+4. Preserve outputs of non-affected subagents — do NOT clear or re-dispatch them.
+5. After the re-dispatched subagent(s) complete, submit an updated PR.
 
 ### Full Regeneration
 When the user requests a full redo (e.g., "redo the whole thing from scratch",

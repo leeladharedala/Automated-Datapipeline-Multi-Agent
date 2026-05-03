@@ -78,6 +78,7 @@ async def invocations(payload, context: RequestContext):
 
         chunk_count = 0
         dispatched_agents: dict[str, str] = {}  # tool_call_id → agent_name
+        partial_tool_calls: dict[str, dict] = {}  # tool_call_id → accumulated fragment
         logger.info("Starting astream for session=%s", session_id)
 
         # Use a queue + keepalive task so the stream never goes idle
@@ -136,15 +137,34 @@ async def invocations(payload, context: RequestContext):
                     )
 
                 # --- Detect sub-agent dispatch (AIMessageChunk with tool_calls) ---
+                # LangGraph stream_mode="messages" delivers tool calls incrementally:
+                #   Chunk 1: name="task", args={}
+                #   Chunk 2: name="",     args={"agent_name": "iac-agent"}
+                # We accumulate fragments by id and defer emission until both
+                # name and agent_name are available.
                 tool_calls = dumped.get("tool_calls") or []
                 for tc in tool_calls:
-                    tc_name = tc.get("name", "")
-                    if tc_name == "task":
-                        args = tc.get("args", {})
-                        agent_name = args.get("agent_name") or args.get("name", "")
-                        tc_id = tc.get("id", "")
-                        if agent_name:
+                    tc_id = tc.get("id", "")
+                    if not tc_id:
+                        continue
+
+                    # Merge this fragment into the accumulator
+                    partial = partial_tool_calls.setdefault(tc_id, {"name": "", "args": {}})
+                    incoming_name = tc.get("name", "")
+                    if incoming_name:
+                        partial["name"] = incoming_name
+                    incoming_args = tc.get("args") or {}
+                    partial["args"].update(incoming_args)
+
+                    # Emit only once we have name="task" AND a non-empty agent_name
+                    if partial.get("name") == "task":
+                        agent_name = (
+                            partial["args"].get("agent_name")
+                            or partial["args"].get("name", "")
+                        )
+                        if agent_name and tc_id not in dispatched_agents:
                             dispatched_agents[tc_id] = agent_name
+                            partial_tool_calls.pop(tc_id, None)
                             logger.info("Sub-agent dispatched: %s → running", agent_name)
                             yield {
                                 "__pipeline_status__": True,

@@ -1,5 +1,5 @@
 # Core agent framework
-deepagents==0.4.8
+deepagents==0.5.6
 langgraph==1.0.10
 langgraph-prebuilt==1.0.8
 langchain==1.2.10

@@ -40,6 +40,7 @@ class DataEngState(BaseSubAgentState, total=False):
     """Data Engineering sub-agent state with transformation code fields."""
 
     code_artifacts: dict[str, str]
+    code_content: dict[str, str]   # filename -> actual file content (passed to validator)
     inferred_schema: dict[str, Any]
     data_sample_status: str
 
