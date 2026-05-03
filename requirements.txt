@@ -1,7 +1,7 @@
 # Core agent framework
 deepagents==0.5.6
-langgraph==1.0.10
-langgraph-prebuilt==1.0.8
+langgraph>=1.0.10
+langgraph-prebuilt>=1.0.8
 langchain>=1.2.15
 langchain-anthropic>=1.3.4
 langchain-openai>=1.1.0
@@ -9,7 +9,7 @@ langchain-mcp-adapters>=0.2.0
 nest_asyncio>=1.6.0
 
 # CopilotKit AG-UI integration
-copilotkit==0.1.84
+copilotkit>=0.1.84
 
 # AgentCore Memory (checkpointer + store for LangGraph)
 langgraph-checkpoint-aws>=0.1.0
