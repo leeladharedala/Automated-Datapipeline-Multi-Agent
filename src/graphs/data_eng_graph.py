@@ -91,47 +91,21 @@ Common issues: missing main() entry point, syntax errors, missing pyspark import
 """
 
 
-def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend=None,
-               ci_tools=None, thread_id: str | None = None) -> str:
-    """Create a mini DeepAgent, invoke it, and return the final AI message text.
+def _invoke_agent(agent, user_message: str, thread_id: str | None = None) -> str:
+    """Invoke a pre-built agent and return the final AI message text.
 
-    Extra tools (e.g. browser tools) are passed on top of the built-in
-    DeepAgent tool stack (write_file, edit_file, read_file, execute, etc.).
-    Pass a backend (e.g. AgentCoreSandbox) to enable the execute tool.
+    Schedules work on the sandbox background loop via run_coroutine_threadsafe
+    so that CI tools' asyncio primitives are always accessed from their owning
+    loop — no "bound to a different event loop" or "Event loop is closed" errors.
 
-    Uses ainvoke (async) to support tools that only implement async invocation
-    (e.g. Code Interpreter StructuredTools from langchain-aws).
-
-    Always schedules work on the sandbox background loop via
-    run_coroutine_threadsafe so that:
-    1. CI tools' asyncio primitives (bound to that loop) are accessed from
-       their owning loop — no "bound to a different event loop" errors.
-    2. The loop is never closed between calls — no "Event loop is closed"
-       errors when httpx tries to clean up TLS connections after asyncio.run().
-
-    Pass thread_id to reuse the same Code Interpreter session across all
-    validate/fix calls within a single pipeline run, avoiding the overhead
-    of starting a new MicroVM session per invocation.
+    The agent must be built once and reused across calls so that the Code
+    Interpreter toolkit's internal session cache (keyed on thread_id + tool
+    instance id) hits on every call rather than spinning up a new MicroVM
+    session each time.
     """
     import asyncio
-    from deepagents import create_deep_agent
     from src.sandbox import _code_interpreter_cache
 
-    kwargs = dict(
-        model=model,
-        system_prompt=system_prompt,
-        tools=tools or [],
-    )
-    if backend is not None:
-        kwargs["backend"] = backend
-    kwargs["checkpointer"] = False  # disable checkpointing for inner agents
-
-    agent = create_deep_agent(**kwargs)
-
-    # Build a stable config so the Code Interpreter toolkit reuses the same
-    # MicroVM session for all validate/fix calls within a pipeline run.
-    # Without this, each ainvoke() gets a fresh auto-generated thread_id and
-    # the toolkit starts a new session every time.
     invoke_config = None
     if thread_id:
         invoke_config = {"configurable": {"thread_id": thread_id}}
@@ -146,8 +120,7 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
 
     # Ensure a long-lived background loop exists for scheduling work.
     # We use the sandbox background loop if it's already been initialised
-    # (by get_code_interpreter_tools()), otherwise create a dedicated one
-    # for this graph module so we never fall back to asyncio.run().
+    # (by get_code_interpreter_tools()), otherwise create a dedicated one.
     #
     # IMPORTANT: We always use the background loop — never asyncio.run().
     # asyncio.run() creates a new event loop, runs the coroutine, then closes
@@ -170,7 +143,6 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
         _code_interpreter_cache["loop"] = _bg_loop
 
     bg_loop = _code_interpreter_cache["loop"]
-    # Always schedule on the background loop — never use asyncio.run().
     result = asyncio.run_coroutine_threadsafe(_ainvoke(), bg_loop).result()
 
     for msg in reversed(result["messages"]):
@@ -178,6 +150,24 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
             from src.graphs._utils import _content_to_str
             return _content_to_str(msg.content)
     return ""
+
+
+def _build_agent(model, tools: list, system_prompt: str):
+    """Build a single DeepAgent instance with checkpointing disabled.
+
+    Agents must be built once per pipeline run and reused across node
+    invocations. Building a new agent per call creates a new toolkit
+    instance with a new internal UUID, which defeats the Code Interpreter
+    toolkit's session cache (keyed on thread_id + tool instance id) and
+    causes a fresh MicroVM session to be started on every LLM call.
+    """
+    from deepagents import create_deep_agent
+    return create_deep_agent(
+        model=model,
+        system_prompt=system_prompt,
+        tools=tools,
+        checkpointer=False,
+    )
 
 
 _SAMPLE_DATA_PROMPT = """\
@@ -330,13 +320,15 @@ def _parse_code_blocks(response: str) -> dict[str, str]:
     return content
 
 
-def _generate(state: DataEngState, model, tools: list,
-              ci_tools=None, thread_id: str | None = None) -> dict[str, Any]:
+def _generate(state: DataEngState, agent, tool_count: int = 0) -> dict[str, Any]:
     """Agent node: pure LLM code generation — no Code Interpreter needed.
 
     The generated code is stored in state['code_content'] as a dict of
     {filename: content}. The validate node reads this and writes the files
     into the MicroVM via execute_code before running the structural check.
+
+    Accepts a pre-built agent so the same toolkit instance is reused across
+    calls — critical for Code Interpreter session reuse.
     """
     task = get_task_description(state)
     inferred_schema = state.get("inferred_schema", {})
@@ -365,11 +357,11 @@ def _generate(state: DataEngState, model, tools: list,
         "agent.node": "generate",
         "agent.role": "code_generator",
         "agent.has_schema": bool(inferred_schema and inferred_schema.get("columns")),
-        "agent.tool_count": len(tools),
+        "agent.tool_count": tool_count,
     }):
         # Generate uses only browser tools — no Code Interpreter needed.
         # The code is returned as text and stored in state for the validate node.
-        response = _run_agent(_GENERATE_PROMPT, user_msg, model, tools=tools)
+        response = _invoke_agent(agent, user_msg)
 
     code_content = _parse_code_blocks(response)
     code_artifacts = {
@@ -446,13 +438,16 @@ Report the full output. State clearly whether validation PASSED or FAILED.
 """
 
 
-def _validate(state: DataEngState, model, ci_tools=None, thread_id: str | None = None) -> dict[str, Any]:
+def _validate(state: DataEngState, agent, thread_id: str | None = None) -> dict[str, Any]:
     """Agent node: write generated code into MicroVM then run structural validation.
 
     The generate node stores code as text in state['code_content'].
     We write those files into the MicroVM via execute_code before running
     the validation script — this bridges the filesystem gap between the
     generate node (pure LLM, no Code Interpreter) and the MicroVM.
+
+    Accepts a pre-built agent so the same toolkit instance (and thus the same
+    MicroVM session) is reused across validate/fix cycles within a pipeline run.
     """
     code_content = state.get("code_content", {})
     artifacts = state.get("code_artifacts", {})
@@ -491,8 +486,7 @@ def _validate(state: DataEngState, model, ci_tools=None, thread_id: str | None =
             "agent.artifact_count": len(artifacts),
             "agent.has_code_content": bool(code_content),
         }):
-            response = _run_agent(_VALIDATE_PROMPT, user_msg, model, tools=ci_tools,
-                                  ci_tools=ci_tools, thread_id=thread_id)
+            response = _invoke_agent(agent, user_msg, thread_id=thread_id)
     except Exception as exc:
         response = str(exc)
 
@@ -514,8 +508,12 @@ def _validate(state: DataEngState, model, ci_tools=None, thread_id: str | None =
     }
 
 
-def _fix(state: DataEngState, model, tools: list, ci_tools=None, thread_id: str | None = None) -> dict[str, Any]:
-    """Agent node: fix pytest failures using Code Interpreter + browser tools."""
+def _fix(state: DataEngState, agent, thread_id: str | None = None) -> dict[str, Any]:
+    """Agent node: fix validation failures using Code Interpreter + browser tools.
+
+    Accepts a pre-built agent so the same toolkit instance (and thus the same
+    MicroVM session) is reused across validate/fix cycles within a pipeline run.
+    """
     attempt = state.get("attempt", 0) + 1
     error_output = state.get("validation_output", "")
     task = get_task_description(state)
@@ -538,10 +536,8 @@ def _fix(state: DataEngState, model, tools: list, ci_tools=None, thread_id: str 
         "agent.node": "fix",
         "agent.role": "debugger",
         "agent.attempt": attempt,
-        "agent.tool_count": len(tools),
     }):
-        response = _run_agent(_FIX_PROMPT, user_msg, model, tools=tools, ci_tools=ci_tools,
-                              thread_id=thread_id)
+        response = _invoke_agent(agent, user_msg, thread_id=thread_id)
 
     # Parse corrected code blocks from the fix response and update code_content in state
     fixed_content = _parse_code_blocks(response)
@@ -621,12 +617,21 @@ def build_data_eng_graph(model, tools=None):
     # install_packages, write_files, etc.)
     from src.sandbox import get_code_interpreter_tools, get_local_shell_backend
     ci_tools = get_code_interpreter_tools()
-    sandbox = get_local_shell_backend()
+    get_local_shell_backend()  # ensure LocalShellBackend is initialised
 
     # Stable thread_id for this pipeline run — ensures all validate/fix calls
     # reuse the same Code Interpreter MicroVM session instead of starting a
     # new one per invocation (which adds ~1s latency each time).
     ci_thread_id = f"data-eng-{uuid.uuid4()}"
+
+    # Build agents ONCE per pipeline run and close over them in the node
+    # lambdas below. This is the critical fix for session churn: the Code
+    # Interpreter toolkit caches sessions keyed on (thread_id, tool_instance_id).
+    # If a new agent is created per call, the tool_instance_id changes every
+    # time → cache miss → new MicroVM session on every LLM call.
+    generate_agent = _build_agent(model, browser_tools, _GENERATE_PROMPT)
+    validate_agent = _build_agent(model, ci_tools, _VALIDATE_PROMPT)
+    fix_agent = _build_agent(model, browser_tools + ci_tools, _FIX_PROMPT)
 
     graph = StateGraph(DataEngState)
 
@@ -636,14 +641,13 @@ def build_data_eng_graph(model, tools=None):
     def generate(state: DataEngState) -> dict[str, Any]:
         # Generate is pure LLM + browser tools — no Code Interpreter needed.
         # Code content is stored in state and written to MicroVM by validate.
-        return _generate(state, model, browser_tools)
+        return _generate(state, generate_agent, tool_count=len(browser_tools))
 
     def validate(state: DataEngState) -> dict[str, Any]:
-        return _validate(state, model, ci_tools=ci_tools, thread_id=ci_thread_id)
+        return _validate(state, validate_agent, thread_id=ci_thread_id)
 
     def fix(state: DataEngState) -> dict[str, Any]:
-        return _fix(state, model, browser_tools + ci_tools, ci_tools=ci_tools,
-                    thread_id=ci_thread_id)
+        return _fix(state, fix_agent, thread_id=ci_thread_id)
 
     def report(state: DataEngState) -> dict[str, Any]:
         return _report(state)
