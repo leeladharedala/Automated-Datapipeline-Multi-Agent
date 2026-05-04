@@ -25,13 +25,18 @@ from src.tracing.utils import traced_span
 # --- System prompts for agent nodes ---
 
 _GENERATE_PROMPT = """\
-You are a GitHub Actions workflow generator. You have access to write_file and \
-read_file tools that write to a shared VFS (persisted by AgentCore Memory).
+You are a GitHub Actions workflow generator.
 
 Given the task description below, generate production-grade GitHub Actions \
-workflow files. Write the following files using write_file:
-- /.github/workflows/deploy.yml — Deploy workflow
-- /.github/workflows/destroy.yml — Destroy/teardown workflow
+workflow files. Respond with EXACTLY two fenced code blocks:
+
+```yaml:deploy.yml
+<full content of deploy.yml here>
+```
+
+```yaml:destroy.yml
+<full content of destroy.yml here>
+```
 
 DEPLOY WORKFLOW (deploy.yml) rules:
 - Trigger on push to main AND workflow_dispatch with environment input.
@@ -59,14 +64,15 @@ GENERAL rules:
 - Use official GitHub Actions where possible (actions/checkout, aws-actions, hashicorp/setup-terraform).
 - Never hardcode credentials — use GitHub secrets and OIDC.
 - Use `terraform init -backend-config` for dynamic backend selection per environment.
-- Write BOTH files, then respond with a summary of what you wrote.
+- Respond with BOTH fenced code blocks above, nothing else before or after.
 """
 
 _VALIDATE_PROMPT = """\
 You are a GitHub Actions workflow linter. You have access to the execute tool \
 which runs commands in the AgentCore Runtime sandbox (actionlint is pre-installed).
 
-Run this command:
+The generated workflow files have already been written to /.github/workflows/ \
+in the sandbox. Run this command:
   execute("actionlint /.github/workflows/deploy.yml /.github/workflows/destroy.yml")
 
 After running the command, report the results. Include the full output \
@@ -86,48 +92,53 @@ You will receive the actionlint error output. Your job:
 
 
 
-def _run_agent(system_prompt: str, user_message: str, model, backend=None) -> str:
-    """Create a mini DeepAgent, invoke it, and return the final AI message text.
+def _build_agent(model, system_prompt: str, backend=None):
+    """Build a single DeepAgent instance with checkpointing disabled.
 
-    Uses ainvoke (async) for consistency with other graphs and to support
-    any async-only tools that may be added in the future.
-
-    Schedules work on the sandbox background loop via run_coroutine_threadsafe
-    to avoid "Event loop is closed" errors when httpx cleans up TLS connections
-    after asyncio.run() tears down a short-lived loop.
+    Agents must be built once per pipeline run and reused across node
+    invocations to avoid unnecessary re-instantiation overhead.
     """
-    import asyncio
     from deepagents import create_deep_agent
-    from src.sandbox import _code_interpreter_cache
-
-    kwargs = dict(model=model, system_prompt=system_prompt)
+    kwargs = dict(
+        model=model,
+        system_prompt=system_prompt,
+        checkpointer=False,
+    )
     if backend is not None:
         kwargs["backend"] = backend
-    kwargs["checkpointer"] = False
+    return create_deep_agent(**kwargs)
 
-    agent = create_deep_agent(**kwargs)
+
+def _invoke_agent(agent, user_message: str, bg_loop_cache: dict | None = None) -> str:
+    """Invoke a pre-built agent and return the final AI message text.
+
+    Schedules work on a long-lived background loop via run_coroutine_threadsafe
+    so that the loop is never closed between calls — avoids httpx TLS cleanup
+    errors that occur when asyncio.run() tears down a short-lived loop.
+    """
+    import asyncio
+    import threading
 
     async def _ainvoke():
         return await agent.ainvoke({"messages": [HumanMessage(content=user_message)]})
 
-    # Ensure a long-lived background loop exists.  Reuse the sandbox loop if
-    # already initialised, otherwise create a dedicated one for this module.
-    if "loop" not in _code_interpreter_cache:
-        import threading
+    cache = bg_loop_cache or {}
+
+    # Ensure a long-lived background loop exists — never use asyncio.run().
+    if "loop" not in cache or not cache["loop"].is_running():
+        _ready = threading.Event()
         _bg_loop = asyncio.new_event_loop()
 
         def _run_bg():
             asyncio.set_event_loop(_bg_loop)
+            _bg_loop.call_soon_threadsafe(_ready.set)
             _bg_loop.run_forever()
 
         threading.Thread(target=_run_bg, daemon=True).start()
-        _code_interpreter_cache["loop"] = _bg_loop
+        _ready.wait(timeout=5)
+        cache["loop"] = _bg_loop
 
-    bg_loop = _code_interpreter_cache.get("loop")
-    if bg_loop is not None and bg_loop.is_running():
-        result = asyncio.run_coroutine_threadsafe(_ainvoke(), bg_loop).result()
-    else:
-        result = asyncio.run(_ainvoke())
+    result = asyncio.run_coroutine_threadsafe(_ainvoke(), cache["loop"]).result()
 
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
@@ -136,8 +147,42 @@ def _run_agent(system_prompt: str, user_message: str, model, backend=None) -> st
     return ""
 
 
-def _generate(state: CICDState, model) -> dict[str, Any]:
-    """Agent node: create_deep_agent with write_file to generate workflow files."""
+def _parse_yaml_blocks(response: str) -> dict[str, str]:
+    """Extract named fenced YAML code blocks from the generate response.
+
+    Looks for blocks like:
+      ```yaml:deploy.yml
+      <content>
+      ```
+    Returns a dict of {filename: content}.
+    Falls back to extracting plain ```yaml blocks in order if named blocks
+    are not found.
+    """
+    import re as _re
+    content: dict[str, str] = {}
+
+    # Try named blocks first: ```yaml:filename.yml
+    named = _re.findall(r"```(?:yaml:)([\w./]+\.yml)\n(.*?)```", response, _re.DOTALL)
+    for fname, code in named:
+        content[fname] = code.strip()
+
+    if "deploy.yml" in content:
+        return content
+
+    # Fallback: grab plain ```yaml blocks in order
+    plain = _re.findall(r"```(?:yaml|yml)?\n(.*?)```", response, _re.DOTALL)
+    expected = ["deploy.yml", "destroy.yml"]
+    for i, code in enumerate(plain[:2]):
+        content[expected[i]] = code.strip()
+
+    return content
+
+
+def _generate(state: CICDState, agent, bg_loop_cache: dict | None = None) -> dict[str, Any]:
+    """Agent node: generate GitHub Actions workflow files and store content in state.
+
+    Accepts a pre-built agent so the same instance is reused across calls.
+    """
     task = get_task_description(state)
 
     with traced_span("agent:cicd.generate", {
@@ -145,35 +190,56 @@ def _generate(state: CICDState, model) -> dict[str, Any]:
         "agent.node": "generate",
         "agent.role": "code_generator",
     }):
-        response = _run_agent(_GENERATE_PROMPT, f"## Task\n{task}", model)
+        response = _invoke_agent(agent, f"## Task\n{task}", bg_loop_cache=bg_loop_cache)
+
+    workflow_content = _parse_yaml_blocks(response)
 
     workflow_artifacts = {
         "deploy.yml": "/.github/workflows/deploy.yml",
         "destroy.yml": "/.github/workflows/destroy.yml",
     }
-    return {"workflow_artifacts": workflow_artifacts, "messages": [AIMessage(content=response)]}
+    return {
+        "workflow_artifacts": workflow_artifacts,
+        "workflow_content": workflow_content,
+        "messages": [AIMessage(content=response)],
+    }
 
 
-def _validate(state: CICDState, model, sandbox=None) -> dict[str, Any]:
-    """Agent node: create_deep_agent with execute to run actionlint."""
+def _validate(state: CICDState, agent, bg_loop_cache: dict | None = None) -> dict[str, Any]:
+    """Agent node: write generated workflow files into sandbox then run actionlint.
+
+    Accepts a pre-built agent so the same instance is reused across validate/fix cycles.
+    """
     task = get_task_description(state)
     artifacts = state.get("workflow_artifacts", {})
+    workflow_content = state.get("workflow_content", {})
+
+    deploy_content = workflow_content.get("deploy.yml", "")
+    destroy_content = workflow_content.get("destroy.yml", "")
+    write_cmds = (
+        "mkdir -p /.github/workflows"
+        f" && python3 -c \"open('/.github/workflows/deploy.yml', 'w').write({repr(deploy_content)})\""
+        f" && python3 -c \"open('/.github/workflows/destroy.yml', 'w').write({repr(destroy_content)})\""
+    )
+
     files_list = ", ".join(artifacts.values()) if artifacts else "unknown"
 
     user_msg = (
+        f"## Step 1: Write generated files into the sandbox\n"
+        f"Run this exact command using execute:\n"
+        f"```\n{write_cmds}\n```\n\n"
+        f"## Step 2: Run actionlint validation\n"
         f"## Task\n{task}\n\n"
         f"## Generated Files\n{files_list}\n\n"
-        "Run actionlint validation now."
+        "After writing the files, run actionlint validation now."
     )
     with traced_span("agent:cicd.validate", {
         "agent.graph": "cicd",
         "agent.node": "validate",
         "agent.role": "validator",
     }):
-        response = _run_agent(_VALIDATE_PROMPT, user_msg, model, backend=sandbox)
+        response = _invoke_agent(agent, user_msg, bg_loop_cache=bg_loop_cache)
 
-    # Check for explicit PASSED/FAILED keywords from the prompt.
-    # Avoid matching generic "success" which can appear in failure context.
     upper = response.upper()
     if "VALIDATION FAILED" in upper or "VALIDATION: FAILED" in upper:
         passed = False
@@ -187,8 +253,11 @@ def _validate(state: CICDState, model, sandbox=None) -> dict[str, Any]:
     }
 
 
-def _fix(state: CICDState, model, sandbox=None) -> dict[str, Any]:
-    """Agent node: create_deep_agent with edit_file to fix actionlint errors."""
+def _fix(state: CICDState, agent, bg_loop_cache: dict | None = None) -> dict[str, Any]:
+    """Agent node: fix actionlint errors and update workflow_content in state.
+
+    Accepts a pre-built agent so the same instance is reused across validate/fix cycles.
+    """
     attempt = state.get("attempt", 0) + 1
     error_output = state.get("validation_output", "")
     task = get_task_description(state)
@@ -196,7 +265,11 @@ def _fix(state: CICDState, model, sandbox=None) -> dict[str, Any]:
     user_msg = (
         f"## Original Task\n{task}\n\n"
         f"## Actionlint Error (attempt {attempt})\n{error_output}\n\n"
-        "Fix the broken workflow files in /.github/workflows/."
+        "Fix the broken workflow files in /.github/workflows/. "
+        "Read the files using execute (e.g. execute('cat /.github/workflows/deploy.yml')), "
+        "fix the issues, then respond with the corrected file content in fenced code blocks:\n\n"
+        "```yaml:deploy.yml\n<corrected content>\n```\n\n"
+        "```yaml:destroy.yml\n<corrected content>\n```"
     )
     with traced_span("agent:cicd.fix", {
         "agent.graph": "cicd",
@@ -204,47 +277,65 @@ def _fix(state: CICDState, model, sandbox=None) -> dict[str, Any]:
         "agent.role": "debugger",
         "agent.attempt": attempt,
     }):
-        response = _run_agent(_FIX_PROMPT, user_msg, model, backend=sandbox)
+        response = _invoke_agent(agent, user_msg, bg_loop_cache=bg_loop_cache)
 
-    return {"attempt": attempt, "messages": [AIMessage(content=response)]}
+    fixed_content = _parse_yaml_blocks(response)
+    current_content = state.get("workflow_content", {})
+    updated_content = {**current_content, **fixed_content}
+
+    return {
+        "attempt": attempt,
+        "workflow_content": updated_content,
+        "messages": [AIMessage(content=response)],
+    }
 
 
 def _report(state: CICDState) -> dict[str, Any]:
     """Pure function: format final report and set messages for CompiledSubAgent return."""
+    import json as _json
     passed = state.get("validation_passed", False)
     attempt = state.get("attempt", 0)
     max_attempts = state.get("max_attempts", 3)
     validation_output = state.get("validation_output", "")
     artifacts = state.get("workflow_artifacts", {})
+    workflow_content = state.get("workflow_content", {})
 
     files_list = ", ".join(artifacts.keys()) if artifacts else "none"
 
-    # Read the actual file content from the VFS so the orchestrator can
-    # include it in followup task descriptions for selective re-dispatch.
+    # Human-readable fenced blocks for context
     file_contents = ""
-    for fname, fpath in artifacts.items():
-        try:
-            with open(fpath) as f:
-                content = f.read()
+    for fname in ["deploy.yml", "destroy.yml"]:
+        content = workflow_content.get(fname, "")
+        if content:
             file_contents += f"\n\n### {fname}\n```yaml\n{content}\n```"
-        except Exception:
+        else:
             file_contents += f"\n\n### {fname}\n(content unavailable)"
 
     if passed:
-        report = (
-            "VALIDATION: PASSED\n"
-            "actionlint completed successfully.\n"
-            f"Files generated: {files_list}\n"
-            f"Attempts used: {attempt}"
-            f"{file_contents}"
-        )
+        status_line = "VALIDATION: PASSED\nactionlint completed successfully."
     else:
-        report = (
-            f"VALIDATION: FAILED ({attempt}/{max_attempts} attempts exhausted)\n\n"
-            f"LAST ERROR:\n{validation_output}\n\n"
-            f"Files generated: {files_list}"
-            f"{file_contents}"
-        )
+        status_line = f"VALIDATION: FAILED ({attempt}/{max_attempts} attempts exhausted)\n\nLAST ERROR:\n{validation_output}"
+
+    # Structured JSON block at the end — the orchestrator extracts files from
+    # this block directly instead of parsing fenced YAML blocks.
+    pr_files = {
+        f".github/workflows/{fname}": workflow_content.get(fname, "")
+        for fname in ["deploy.yml", "destroy.yml"]
+        if workflow_content.get(fname)
+    }
+    structured_block = (
+        "\n\n<!-- PR_FILES_JSON\n"
+        + _json.dumps(pr_files, indent=2)
+        + "\n-->"
+    )
+
+    report = (
+        f"{status_line}\n"
+        f"Files generated: {files_list}\n"
+        f"Attempts used: {attempt}"
+        f"{file_contents}"
+        f"{structured_block}"
+    )
 
     return {
         "report": report,
@@ -264,6 +355,9 @@ def _should_retry_or_report(state: CICDState) -> str:
 def build_cicd_graph(model):
     """Factory: build and compile the CI/CD SubAgent StateGraph.
 
+    Agents are built ONCE here and reused across all node invocations to
+    avoid unnecessary re-instantiation overhead per call.
+
     Args:
         model: A ChatAnthropic (or compatible) LLM instance.
 
@@ -272,19 +366,30 @@ def build_cicd_graph(model):
     """
     graph = StateGraph(CICDState)
 
-    # Load local shell backend for validate/fix nodes (terraform + actionlint
-    # are pre-installed in the container)
+    # Load local shell backend (actionlint pre-installed in container)
     from src.sandbox import get_local_shell_backend
     sandbox = get_local_shell_backend()
 
+    # Shared background loop cache — ensures all agents in this graph reuse
+    # the same long-lived loop for asyncio.run_coroutine_threadsafe calls.
+    _bg_loop_cache: dict = {}
+
+    # Build agents ONCE per pipeline run and close over them in node lambdas.
+    # generate_agent: pure LLM workflow generation, no sandbox tools.
+    # validate_agent: LocalShellBackend for actionlint.
+    # fix_agent: LocalShellBackend for reading + fixing workflow files.
+    generate_agent = _build_agent(model, _GENERATE_PROMPT)
+    validate_agent = _build_agent(model, _VALIDATE_PROMPT, backend=sandbox)
+    fix_agent = _build_agent(model, _FIX_PROMPT, backend=sandbox)
+
     def generate(state: CICDState) -> dict[str, Any]:
-        return _generate(state, model)
+        return _generate(state, generate_agent, bg_loop_cache=_bg_loop_cache)
 
     def validate(state: CICDState) -> dict[str, Any]:
-        return _validate(state, model, sandbox=sandbox)
+        return _validate(state, validate_agent, bg_loop_cache=_bg_loop_cache)
 
     def fix(state: CICDState) -> dict[str, Any]:
-        return _fix(state, model, sandbox=sandbox)
+        return _fix(state, fix_agent, bg_loop_cache=_bg_loop_cache)
 
     def report(state: CICDState) -> dict[str, Any]:
         return _report(state)

@@ -1,18 +1,19 @@
-"""Data Engineering SubAgent Graph — transformation code generation with pytest validation.
+"""Data Engineering SubAgent Graph — transformation code generation with structural validation.
 
 Builds a compiled LangGraph StateGraph that:
-1. Samples data schema via a mini DeepAgent with execute (agent node)
-2. Generates data transformation code via a mini DeepAgent with write_file + browser tools (agent node)
-3. Validates with pytest via a mini DeepAgent with execute (agent node)
-4. Self-heals on validation failure via a mini DeepAgent with edit_file + browser tools (agent node)
+1. Samples data schema directly from S3 using boto3/pandas in-process (no agent)
+2. Generates data transformation code via a mini DeepAgent with browser tools (pure LLM, no CI)
+3. Validates code structure via a mini DeepAgent with Code Interpreter tools:
+   - Writes generated code into the MicroVM via execute_code
+   - Runs a structural check script (AST parse, required files, main() presence, pyspark imports)
+4. Self-heals on validation failure via a mini DeepAgent with browser + Code Interpreter tools
 5. Produces a final pass/fail report (pure function)
 
 No research node — DataEng generation starts directly from the task description.
-The generate and fix agent nodes have browser tools bound for on-demand framework
-documentation lookup (PySpark, Pandas, dbt).
-Agent nodes use create_deep_agent to get VFS (write_file, edit_file, read_file)
-and sandbox execution (execute) — artifacts are persisted to AgentCore short-term
-memory via the shared VFS.
+The generate node uses only browser tools for on-demand framework documentation lookup.
+The validate and fix nodes use Code Interpreter tools to operate on the MicroVM filesystem.
+Generated code is stored in state['code_content'] and written into the MicroVM by validate,
+avoiding the VFS vs MicroVM filesystem split.
 """
 
 import io
@@ -457,17 +458,16 @@ def _validate(state: DataEngState, agent, thread_id: str | None = None) -> dict[
     transform_code = code_content.get("transform.py", "")
     init_code = code_content.get("__init__.py", "")
 
-    # Escape backslashes and triple-quotes so the content embeds safely
-    def _escape(s: str) -> str:
-        return s.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
-
+    # Use repr() to produce a safe, fully-escaped string literal for any
+    # Python string content — handles backslashes, triple-quotes, newlines,
+    # and all other special characters that break triple-quote embedding.
     setup_code = (
         "import os\n"
         "os.makedirs('/src/transformations', exist_ok=True)\n"
         f'with open("/src/transformations/transform.py", "w") as f:\n'
-        f'    f.write("""{_escape(transform_code)}""")\n'
+        f'    f.write({repr(transform_code)})\n'
         f'with open("/src/transformations/__init__.py", "w") as f:\n'
-        f'    f.write("""{_escape(init_code)}""")\n'
+        f'    f.write({repr(init_code)})\n'
         "print('Files written to /src/transformations/')\n"
         "print(os.listdir('/src/transformations/'))\n"
     )
@@ -553,6 +553,7 @@ def _fix(state: DataEngState, agent, thread_id: str | None = None) -> dict[str, 
 
 def _report(state: DataEngState) -> dict[str, Any]:
     """Pure function: format final report and set messages for CompiledSubAgent return."""
+    import json as _json
     passed = state.get("validation_passed", False)
     attempt = state.get("attempt", 0)
     max_attempts = state.get("max_attempts", 3)
@@ -562,28 +563,37 @@ def _report(state: DataEngState) -> dict[str, Any]:
 
     files_list = ", ".join(artifacts.keys()) if artifacts else "none"
 
-    # Include the actual generated code so the orchestrator can pass it back
-    # on followup/re-dispatch requests without needing to regenerate from scratch.
+    # Human-readable fenced blocks for context
     file_contents = ""
     for fname, content in code_content.items():
         if content:
             file_contents += f"\n\n### {fname}\n```python\n{content}\n```"
 
     if passed:
-        report = (
-            "VALIDATION: PASSED\n"
-            "pytest completed successfully.\n"
-            f"Files generated: {files_list}\n"
-            f"Attempts used: {attempt}"
-            f"{file_contents}"
-        )
+        status_line = "VALIDATION: PASSED\npytest completed successfully."
     else:
-        report = (
-            f"VALIDATION: FAILED ({attempt}/{max_attempts} attempts exhausted)\n\n"
-            f"LAST ERROR:\n{validation_output}\n\n"
-            f"Files generated: {files_list}"
-            f"{file_contents}"
-        )
+        status_line = f"VALIDATION: FAILED ({attempt}/{max_attempts} attempts exhausted)\n\nLAST ERROR:\n{validation_output}"
+
+    # Structured JSON block at the end — the orchestrator extracts files from
+    # this block directly instead of parsing fenced Python blocks.
+    pr_files = {
+        f"src/transformations/{fname}": content
+        for fname, content in code_content.items()
+        if content
+    }
+    structured_block = (
+        "\n\n<!-- PR_FILES_JSON\n"
+        + _json.dumps(pr_files, indent=2)
+        + "\n-->"
+    )
+
+    report = (
+        f"{status_line}\n"
+        f"Files generated: {files_list}\n"
+        f"Attempts used: {attempt}"
+        f"{file_contents}"
+        f"{structured_block}"
+    )
 
     return {
         "report": report,

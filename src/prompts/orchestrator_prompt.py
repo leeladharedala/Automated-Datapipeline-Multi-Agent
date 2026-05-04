@@ -21,11 +21,12 @@ When the user describes a pipeline in free-form text (no structured document):
    - Do NOT wait for one to finish before starting the next.
 3. After all three subagents return, review the generated files.
 4. Use `submit_pr` to commit all files and open a Pull Request.
-   - Extract file content from each subagent's report (the fenced code blocks).
-   - Pass ALL files as the `files` dict: IaC .tf files, CI/CD .yml files, and
-     data-eng .py files together in a single `submit_pr` call.
-   - Use the file paths as keys (e.g. "infra/main.tf", ".github/workflows/deploy.yml",
-     "src/transformations/transform.py") and the code block content as values.
+   - Each subagent report ends with a `<!-- PR_FILES_JSON ... -->` block containing
+     a JSON object mapping file paths to their content. Extract the `files` dict
+     for `submit_pr` by merging the PR_FILES_JSON blocks from all three reports.
+   - Example: parse the JSON between `<!-- PR_FILES_JSON` and `-->` from each report,
+     then merge all three dicts into a single `files` argument for `submit_pr`.
+   - Do NOT attempt to re-parse fenced code blocks — use only the PR_FILES_JSON blocks.
 5. Return the PR link to the user.
 
 ### New Pipeline Request — Document-Driven Mode
@@ -52,11 +53,13 @@ When the user submits a structured Pipeline Document (JSON or YAML containing
 5. If any subagent returned FAILED, include the failure details in the summary
    and prompt the user for a remediation decision.
 6. Use `submit_pr` to commit all files and open a Pull Request.
-   - Extract file content from each subagent's report (the fenced code blocks).
-   - Pass ALL files as the `files` dict in a single `submit_pr` call:
-     - IaC files: "infra/provider.tf", "infra/variables.tf", "infra/main.tf", "infra/outputs.tf"
-     - CI/CD files: ".github/workflows/deploy.yml", ".github/workflows/destroy.yml"
-     - Data-eng files: "src/transformations/transform.py", "src/transformations/__init__.py"
+   - Each subagent report ends with a `<!-- PR_FILES_JSON ... -->` block containing
+     a JSON object mapping file paths to their content. Merge the PR_FILES_JSON
+     blocks from all three reports into a single `files` dict for `submit_pr`:
+     - IaC report PR_FILES_JSON: keys like "infra/provider.tf", "infra/main.tf", etc.
+     - CI/CD report PR_FILES_JSON: keys like ".github/workflows/deploy.yml", etc.
+     - Data-eng report PR_FILES_JSON: keys like "src/transformations/transform.py", etc.
+   - Do NOT attempt to re-parse fenced code blocks — use only the PR_FILES_JSON blocks.
 
 ### Follow-Up Q&A
 When the user sends a follow-up message that is a question (not a modification
@@ -78,9 +81,9 @@ When the user asks to submit a PR (e.g., "submit a PR", "create the PR",
 "open a pull request", "push the code"):
 - Call `submit_pr` directly with the already-generated files from
   `accumulated_results`. Do NOT re-dispatch any subagents.
-- Extract the file content from the fenced code blocks in each subagent's
-  report in `accumulated_results`. Use the file paths as keys and the code
-  block content as values in the `files` dict.
+- Extract the `files` dict by parsing the `<!-- PR_FILES_JSON ... -->` block
+  at the end of each subagent's report in `accumulated_results`, then merge
+  all three into a single dict. Do NOT re-parse fenced code blocks.
 - The pipeline has already completed — the artifacts are ready to commit.
 
 **Failed Tool Retry:**
@@ -104,7 +107,8 @@ the IaC part with a different VPC setup"):
      task description.
    - IMPORTANT: Also include the previously generated code from
      `accumulated_results` for that subagent so it can modify the existing
-     code rather than regenerating from scratch. For example:
+     code rather than regenerating from scratch. Extract the code from the
+     `<!-- PR_FILES_JSON ... -->` block in that subagent's report. For example:
      "Here is the previously generated transform.py: <code>. Modify it to..."
    - If multiple subagents are affected, dispatch them in parallel.
 3. Preserve the outputs of non-affected subagents — do NOT clear or re-dispatch them.
@@ -120,8 +124,9 @@ component (e.g., "regenerate just the Terraform", "redo the data-eng code",
    description alongside the original Pipeline Document context.
 3. IMPORTANT: Include the previously generated code from `accumulated_results`
    for that subagent so it can modify the existing code rather than starting
-   from scratch. For example: "Here is the current transform.py: <code>. The
-   PR review feedback is: <feedback>. Please update accordingly."
+   from scratch. Extract the code from the `<!-- PR_FILES_JSON ... -->` block
+   in that subagent's report. For example: "Here is the current transform.py:
+   <code>. The PR review feedback is: <feedback>. Please update accordingly."
 4. Preserve outputs of non-affected subagents — do NOT clear or re-dispatch them.
 5. After the re-dispatched subagent(s) complete, submit an updated PR.
 

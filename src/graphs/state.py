@@ -28,12 +28,14 @@ class IaCState(BaseSubAgentState, total=False):
 
     research_context: str
     tf_artifacts: dict[str, str]
+    tf_content: dict[str, str]   # filename -> actual file content (passed to validator)
 
 
 class CICDState(BaseSubAgentState, total=False):
     """CI/CD sub-agent state with GitHub Actions workflow fields."""
 
     workflow_artifacts: dict[str, str]
+    workflow_content: dict[str, str]   # filename -> actual file content (passed to validator)
 
 
 class DataEngState(BaseSubAgentState, total=False):
