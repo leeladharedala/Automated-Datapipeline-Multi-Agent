@@ -182,7 +182,7 @@ def _invoke_agent(agent, user_message: str, bg_loop_cache: dict | None = None) -
     return ""
 
 
-def _research(state: IaCState, agent, tools_cache: dict) -> dict[str, Any]:
+def _research(state: IaCState, agent, tools_cache: dict, original_model=None) -> dict[str, Any]:
     """Agent node: invoke pre-built research agent with MCP tools.
 
     If no tools were loaded at graph build time, lazily loads them from the
@@ -192,6 +192,12 @@ def _research(state: IaCState, agent, tools_cache: dict) -> dict[str, Any]:
     NOTE: When tools are lazy-loaded, the research agent cannot be pre-built
     (tools aren't available at factory time), so a one-time agent build happens
     here. The agent is then cached in tools_cache["agent"] for reuse.
+
+    Args:
+        original_model: The original LLM model instance (e.g. ChatAnthropic) used
+            to rebuild the research agent when tools are lazy-loaded. Required
+            because `agent` is a CompiledStateGraph and cannot be passed as a
+            model to create_deep_agent.
     """
     task = get_task_description(state)
     if not task:
@@ -227,9 +233,17 @@ def _research(state: IaCState, agent, tools_cache: dict) -> dict[str, Any]:
         return {"research_context": "No research tools available."}
 
     # If tools were lazy-loaded, the pre-built agent had no tools — build+cache once.
+    # Use the original model (ChatAnthropic instance) rather than the compiled agent
+    # graph, which is a CompiledStateGraph and cannot be passed as a model string.
     active_agent = tools_cache.get("agent") or agent
     if not tools_cache.get("agent"):
-        active_agent = _build_agent(agent._model if hasattr(agent, '_model') else agent, active_tools, _RESEARCH_PROMPT)
+        if original_model is None:
+            raise ValueError(
+                "Cannot rebuild research agent: original_model is required "
+                "when tools are lazy-loaded (the pre-built agent is a "
+                "CompiledStateGraph, not a model)."
+            )
+        active_agent = _build_agent(original_model, active_tools, _RESEARCH_PROMPT)
         tools_cache["agent"] = active_agent
 
     with traced_span("agent:iac.research", {
@@ -498,7 +512,7 @@ def build_iac_graph(model, tools=None):
     fix_agent = _build_agent(model, [], _FIX_PROMPT, backend=sandbox)
 
     def research(state: IaCState) -> dict[str, Any]:
-        return _research(state, research_agent, _cached_tools)
+        return _research(state, research_agent, _cached_tools, original_model=model)
 
     def generate(state: IaCState) -> dict[str, Any]:
         return _generate(state, generate_agent, bg_loop_cache=_cached_tools)
