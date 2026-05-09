@@ -391,136 +391,83 @@ Report the full output exactly as printed. State clearly whether validation PASS
 """
 
 
-def _validate(state: DataEngState, agent, thread_id: str | None = None, model=None) -> dict[str, Any]:
-    """Agent node: write generated code into MicroVM then run structural validation.
+def _validate(state: DataEngState) -> dict[str, Any]:
+    """Validate generated code structure directly in Python — no LLM needed.
 
     The generate node stores code as text in state['code_content'].
-    We write those files into the MicroVM via execute_code before running
-    the validation script — this bridges the filesystem gap between the
-    generate node (pure LLM, no Code Interpreter) and the MicroVM.
+    We run the AST structural check directly here without involving the
+    Code Interpreter MicroVM or an LLM agent. This avoids the fundamental
+    problem of execute_code sessions being isolated per-call (files written
+    in one call are not visible in the next).
 
-    Accepts a pre-built agent so the same toolkit instance (and thus the same
-    MicroVM session) is reused across validate/fix cycles within a pipeline run.
+    The Code Interpreter is only needed for fix attempts that require
+    actually running the code — structural validation (AST parse, required
+    functions, imports) is pure Python and needs no sandbox.
     """
     code_content = state.get("code_content", {})
     artifacts = state.get("code_artifacts", {})
 
-    # Build a single Python snippet that writes the generated files AND runs the
-    # validation script in one execute_code call. This is critical because each
-    # execute_code invocation runs in an isolated MicroVM session — files written
-    # in one call are NOT visible in the next call. Combining both steps into one
-    # call ensures the files exist when the validation script checks for them.
     transform_code = code_content.get("transform.py", "")
     init_code = code_content.get("__init__.py", "")
 
-    combined_code = (
-        "import os, ast, sys\n\n"
-        "# --- Step 1: Write generated files ---\n"
-        "os.makedirs('/tmp/transformations', exist_ok=True)\n"
-        f'with open("/tmp/transformations/transform.py", "w") as f:\n'
-        f'    f.write({repr(transform_code)})\n'
-        f'with open("/tmp/transformations/__init__.py", "w") as f:\n'
-        f'    f.write({repr(init_code)})\n'
-        "print('Files written to /tmp/transformations/')\n\n"
-        "# --- Step 2: Validate ---\n"
-        "errors = []\n"
-        "func_names = []\n\n"
-        'required = ["/tmp/transformations/transform.py", "/tmp/transformations/__init__.py"]\n'
-        "for f in required:\n"
-        "    if not os.path.exists(f):\n"
-        '        errors.append(f"MISSING: {f}")\n\n'
-        'tf = "/tmp/transformations/transform.py"\n'
-        "if os.path.exists(tf):\n"
-        "    source = open(tf).read()\n"
-        "    try:\n"
-        "        tree = ast.parse(source)\n"
-        "    except SyntaxError as e:\n"
-        '        errors.append(f"SYNTAX ERROR in transform.py: {e}")\n'
-        "        tree = None\n"
-        "    if tree:\n"
-        "        func_names = [n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]\n"
-        "        if not func_names:\n"
-        '            errors.append("NO FUNCTIONS found in transform.py")\n'
-        '        if "main" not in func_names:\n'
-        '            errors.append("MISSING main() entry point in transform.py")\n'
-        "        imports = [n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]\n"
-        "        has_pyspark = any(\n"
-        '            (isinstance(n, ast.ImportFrom) and n.module and "pyspark" in n.module)\n'
-        '            or (isinstance(n, ast.Import) and any("pyspark" in a.name for a in n.names))\n'
-        "            for n in imports\n"
-        "        )\n"
-        "        if not has_pyspark:\n"
-        '            errors.append("NO pyspark imports found - expected PySpark DataFrame code")\n\n'
-        'init = "/tmp/transformations/__init__.py"\n'
-        "if os.path.exists(init):\n"
-        "    try:\n"
-        "        ast.parse(open(init).read())\n"
-        "    except SyntaxError as e:\n"
-        '        errors.append(f"SYNTAX ERROR in __init__.py: {e}")\n\n'
-        "if errors:\n"
-        '    print("VALIDATION: FAILED")\n'
-        "    for e in errors:\n"
-        '        print(f"  - {e}")\n'
-        "    sys.exit(1)\n"
-        "else:\n"
-        '    print("VALIDATION: PASSED")\n'
-        "    print(f\"  - Functions found: {', '.join(func_names)}\")\n"
-        '    print("  - All required files present and syntactically valid")\n'
-    )
+    errors = []
+    func_names = []
 
-    user_msg = (
-        "Run the following Python code using a SINGLE execute_code call. "
-        "It writes the generated files and validates them in one execution — "
-        "do NOT split into multiple calls or the files will not persist:\n\n"
-        f"```python\n{combined_code}\n```\n\n"
-        "Report the full output. State clearly whether validation PASSED or FAILED."
-    )
-
-    try:
-        with traced_span("agent:data_eng.validate", {
-            "agent.graph": "data_eng",
-            "agent.node": "validate",
-            "agent.artifact_count": len(artifacts),
-            "agent.has_code_content": bool(code_content),
-        }):
-            response = _invoke_agent(agent, user_msg, thread_id=thread_id)
-    except Exception as exc:
-        # If the Code Interpreter session expired, attempt to restart it once.
-        # A fresh session means the files need to be re-written, which the
-        # validate prompt already handles (Step 1 writes files, Step 2 validates).
-        # Any other exception is surfaced as a validation failure so the graph
-        # can route to fix/report rather than crashing.
-        if _is_session_inactive_error(exc):
-            logger.warning(
-                "Code Interpreter session inactive during validate, "
-                "attempting session restart: %s", exc,
-            )
-            try:
-                from src.sandbox import reset_code_interpreter_tools
-                new_ci_tools = reset_code_interpreter_tools()
-                if new_ci_tools and model is not None:
-                    # Rebuild the agent with the fresh session tools and retry once.
-                    new_agent = _build_agent(model, new_ci_tools, _VALIDATE_PROMPT)
-                    response = _invoke_agent(new_agent, user_msg, thread_id=thread_id)
-                else:
-                    response = f"VALIDATION: FAILED\nCode Interpreter session expired and could not be restarted: {exc}"
-            except Exception as restart_exc:
-                logger.warning("Session restart failed: %s", restart_exc)
-                response = f"VALIDATION: FAILED\nCode Interpreter session expired: {exc}"
+    with traced_span("agent:data_eng.validate", {
+        "agent.graph": "data_eng",
+        "agent.node": "validate",
+        "agent.artifact_count": len(artifacts),
+        "agent.has_code_content": bool(code_content),
+    }):
+        # Check transform.py
+        if not transform_code:
+            errors.append("MISSING: transform.py (no code generated)")
         else:
-            response = str(exc)
+            import ast as _ast
+            try:
+                tree = _ast.parse(transform_code)
+                func_names = [
+                    n.name for n in _ast.walk(tree)
+                    if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+                ]
+                if not func_names:
+                    errors.append("NO FUNCTIONS found in transform.py")
+                if "main" not in func_names:
+                    errors.append("MISSING main() entry point in transform.py")
+                imports = [
+                    n for n in _ast.walk(tree)
+                    if isinstance(n, (_ast.Import, _ast.ImportFrom))
+                ]
+                has_pyspark = any(
+                    (isinstance(n, _ast.ImportFrom) and n.module and "pyspark" in n.module)
+                    or (isinstance(n, _ast.Import) and any("pyspark" in a.name for a in n.names))
+                    for n in imports
+                )
+                if not has_pyspark:
+                    errors.append("NO pyspark imports found - expected PySpark DataFrame code")
+            except SyntaxError as e:
+                errors.append(f"SYNTAX ERROR in transform.py: {e}")
 
-    output = response
-    upper = output.upper()
-    if "VALIDATION FAILED" in upper or "VALIDATION: FAILED" in upper:
+        # Check __init__.py (just needs to be parseable — can be empty)
+        if init_code is None:
+            errors.append("MISSING: __init__.py (no code generated)")
+        else:
+            import ast as _ast
+            try:
+                _ast.parse(init_code)
+            except SyntaxError as e:
+                errors.append(f"SYNTAX ERROR in __init__.py: {e}")
+
+    if errors:
+        output = "VALIDATION: FAILED\n" + "\n".join(f"  - {e}" for e in errors)
         passed = False
-    elif "VALIDATION PASSED" in upper or "VALIDATION: PASSED" in upper:
-        passed = True
     else:
-        output_lower = output.lower()
-        has_passed = "passed" in output_lower
-        has_failed = "failed" in output_lower or "error" in output_lower
-        passed = has_passed and not has_failed
+        output = (
+            "VALIDATION: PASSED\n"
+            f"  - Functions found: {', '.join(func_names)}\n"
+            "  - All required files present and syntactically valid"
+        )
+        passed = True
 
     return {
         "validation_passed": passed,
@@ -735,7 +682,7 @@ def build_data_eng_graph(model, tools=None):
     # If a new agent is created per call, the tool_instance_id changes every
     # time → cache miss → new MicroVM session on every LLM call.
     generate_agent = _build_agent(model, browser_tools, _GENERATE_PROMPT)
-    validate_agent = _build_agent(model, ci_tools, _VALIDATE_PROMPT)
+    # validate node uses pure-Python AST check — no agent needed
     fix_agent = _build_agent(model, browser_tools + ci_tools, _FIX_PROMPT)
     # Fallback agent used when the Code Interpreter session has expired: browser
     # tools only, fixes code purely from state without MicroVM filesystem access.
@@ -752,7 +699,7 @@ def build_data_eng_graph(model, tools=None):
         return _generate(state, generate_agent, tool_count=len(browser_tools))
 
     def validate(state: DataEngState) -> dict[str, Any]:
-        return _validate(state, validate_agent, thread_id=ci_thread_id, model=model)
+        return _validate(state)
 
     def fix(state: DataEngState) -> dict[str, Any]:
         return _fix(state, fix_agent, fallback_agent=fallback_fix_agent, thread_id=ci_thread_id)
