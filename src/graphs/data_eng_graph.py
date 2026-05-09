@@ -380,62 +380,14 @@ _VALIDATE_PROMPT = """\
 You are a code structure validator. You have access to execute_code \
 (Code Interpreter tool) which runs Python in an isolated MicroVM sandbox.
 
-The generated code has already been written to /tmp/transformations/ in the \
-MicroVM. Run the following validation script using execute_code:
+CRITICAL: Each execute_code call runs in a completely isolated session. \
+Files written in one call are NOT visible in the next call. \
+You MUST run the write step and the validation step in a SINGLE execute_code call.
 
-```python
-import ast, sys, os
+You will receive a single Python code block. Run it as ONE execute_code call. \
+Do not split it into multiple calls.
 
-errors = []
-func_names = []
-
-required = ["/tmp/transformations/transform.py", "/tmp/transformations/__init__.py"]
-for f in required:
-    if not os.path.exists(f):
-        errors.append(f"MISSING: {f}")
-
-tf = "/tmp/transformations/transform.py"
-if os.path.exists(tf):
-    source = open(tf).read()
-    try:
-        tree = ast.parse(source)
-    except SyntaxError as e:
-        errors.append(f"SYNTAX ERROR in transform.py: {e}")
-        tree = None
-    if tree:
-        func_names = [n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-        if not func_names:
-            errors.append("NO FUNCTIONS found in transform.py")
-        if "main" not in func_names:
-            errors.append("MISSING main() entry point in transform.py")
-        imports = [n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]
-        has_pyspark = any(
-            (isinstance(n, ast.ImportFrom) and n.module and "pyspark" in n.module)
-            or (isinstance(n, ast.Import) and any("pyspark" in a.name for a in n.names))
-            for n in imports
-        )
-        if not has_pyspark:
-            errors.append("NO pyspark imports found - expected PySpark DataFrame code")
-
-init = "/tmp/transformations/__init__.py"
-if os.path.exists(init):
-    try:
-        ast.parse(open(init).read())
-    except SyntaxError as e:
-        errors.append(f"SYNTAX ERROR in __init__.py: {e}")
-
-if errors:
-    print("VALIDATION: FAILED")
-    for e in errors:
-        print(f"  - {e}")
-    sys.exit(1)
-else:
-    print("VALIDATION: PASSED")
-    print(f"  - Functions found: {', '.join(func_names)}")
-    print("  - All required files present and syntactically valid")
-```
-
-Report the full output. State clearly whether validation PASSED or FAILED.
+Report the full output exactly as printed. State clearly whether validation PASSED or FAILED.
 """
 
 
@@ -453,30 +405,75 @@ def _validate(state: DataEngState, agent, thread_id: str | None = None, model=No
     code_content = state.get("code_content", {})
     artifacts = state.get("code_artifacts", {})
 
-    # Build a Python snippet that writes the generated files into the MicroVM.
-    # This runs as the first execute_code call so the validation script finds them.
+    # Build a single Python snippet that writes the generated files AND runs the
+    # validation script in one execute_code call. This is critical because each
+    # execute_code invocation runs in an isolated MicroVM session — files written
+    # in one call are NOT visible in the next call. Combining both steps into one
+    # call ensures the files exist when the validation script checks for them.
     transform_code = code_content.get("transform.py", "")
     init_code = code_content.get("__init__.py", "")
 
-    # Use repr() to produce a safe, fully-escaped string literal for any
-    # Python string content — handles backslashes, triple-quotes, newlines,
-    # and all other special characters that break triple-quote embedding.
-    setup_code = (
-        "import os\n"
+    combined_code = (
+        "import os, ast, sys\n\n"
+        "# --- Step 1: Write generated files ---\n"
         "os.makedirs('/tmp/transformations', exist_ok=True)\n"
         f'with open("/tmp/transformations/transform.py", "w") as f:\n'
         f'    f.write({repr(transform_code)})\n'
         f'with open("/tmp/transformations/__init__.py", "w") as f:\n'
         f'    f.write({repr(init_code)})\n'
-        "print('Files written to /tmp/transformations/')\n"
-        "print(os.listdir('/tmp/transformations/'))\n"
+        "print('Files written to /tmp/transformations/')\n\n"
+        "# --- Step 2: Validate ---\n"
+        "errors = []\n"
+        "func_names = []\n\n"
+        'required = ["/tmp/transformations/transform.py", "/tmp/transformations/__init__.py"]\n'
+        "for f in required:\n"
+        "    if not os.path.exists(f):\n"
+        '        errors.append(f"MISSING: {f}")\n\n'
+        'tf = "/tmp/transformations/transform.py"\n'
+        "if os.path.exists(tf):\n"
+        "    source = open(tf).read()\n"
+        "    try:\n"
+        "        tree = ast.parse(source)\n"
+        "    except SyntaxError as e:\n"
+        '        errors.append(f"SYNTAX ERROR in transform.py: {e}")\n'
+        "        tree = None\n"
+        "    if tree:\n"
+        "        func_names = [n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]\n"
+        "        if not func_names:\n"
+        '            errors.append("NO FUNCTIONS found in transform.py")\n'
+        '        if "main" not in func_names:\n'
+        '            errors.append("MISSING main() entry point in transform.py")\n'
+        "        imports = [n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]\n"
+        "        has_pyspark = any(\n"
+        '            (isinstance(n, ast.ImportFrom) and n.module and "pyspark" in n.module)\n'
+        '            or (isinstance(n, ast.Import) and any("pyspark" in a.name for a in n.names))\n'
+        "            for n in imports\n"
+        "        )\n"
+        "        if not has_pyspark:\n"
+        '            errors.append("NO pyspark imports found - expected PySpark DataFrame code")\n\n'
+        'init = "/tmp/transformations/__init__.py"\n'
+        "if os.path.exists(init):\n"
+        "    try:\n"
+        "        ast.parse(open(init).read())\n"
+        "    except SyntaxError as e:\n"
+        '        errors.append(f"SYNTAX ERROR in __init__.py: {e}")\n\n'
+        "if errors:\n"
+        '    print("VALIDATION: FAILED")\n'
+        "    for e in errors:\n"
+        '        print(f"  - {e}")\n'
+        "    sys.exit(1)\n"
+        "else:\n"
+        '    print("VALIDATION: PASSED")\n'
+        "    print(f\"  - Functions found: {', '.join(func_names)}\")\n"
+        '    print("  - All required files present and syntactically valid")\n'
     )
 
     user_msg = (
-        f"## Step 1: Write generated files into the MicroVM\n"
-        f"Run this exact Python code using execute_code:\n```python\n{setup_code}\n```\n\n"
-        f"## Step 2: Run the validation script\n"
-        f"After the files are written, run the validation script from the prompt."
+        "Run the following Python code using a SINGLE execute_code call. "
+        "It writes the generated files and validates them in one execution — "
+        "do NOT split into multiple calls or the files will not persist:\n\n"
+        f"```python\n{combined_code}\n```\n\n"
+        "Report the full output. State clearly whether validation PASSED or FAILED."
     )
 
     try:

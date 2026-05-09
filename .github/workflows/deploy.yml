@@ -101,36 +101,13 @@ jobs:
           provenance: false
 
   # ────────────────────────────────────────────────────────────
-  # Job 2: Sync Secrets (parallel with build)
-  # ────────────────────────────────────────────────────────────
-  sync-secrets:
-    name: Sync Anthropic API Key
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-
-    steps:
-      - name: Push Anthropic API key to Secrets Manager
-        run: |
-          SECRET_ID="${{ env.PROJECT_NAME }}-${{ env.TF_ENVIRONMENT }}/anthropic-api-key"
-
-          if aws secretsmanager describe-secret --secret-id "$SECRET_ID" 2>/dev/null; then
-            echo "Updating existing secret..."
-            aws secretsmanager put-secret-value \
-              --secret-id "$SECRET_ID" \
-              --secret-string "${{ secrets.ANTHROPIC_API_KEY }}"
-            echo "✅ Anthropic API key synced to Secrets Manager"
-          else
-            echo "⚠️ Secret not found — will be created by Terraform on first run."
-          fi
-
-  # ────────────────────────────────────────────────────────────
-  # Job 3: Terraform Apply (with remote state)
+  # Job 2: Terraform Apply (with remote state)
   # ────────────────────────────────────────────────────────────
   terraform-deploy:
     name: Terraform Deploy
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [build-and-push, sync-secrets]
+    needs: [build-and-push]
 
     defaults:
       run:
@@ -192,7 +169,7 @@ jobs:
         run: terraform apply -auto-approve -input=false tfplan
 
       - name: Sync raw data to S3
-        working-directory: .
+        working-directory: ${{ github.workspace }}
         run: |
           if [ -d "raw_data" ]; then
             BUCKET_NAME=$(cd infra && terraform output -raw raw_data_bucket_name)
@@ -220,6 +197,46 @@ jobs:
           echo "### Frontend Setup" >> "$GITHUB_STEP_SUMMARY"
           echo '```bash' >> "$GITHUB_STEP_SUMMARY"
           echo "cd frontend" >> "$GITHUB_STEP_SUMMARY"
-          echo "echo 'AGENTCORE_RUNTIME_ENDPOINT=$(terraform output -raw agent_runtime_endpoint)' > .env.local" >> "$GITHUB_STEP_SUMMARY"
+          echo "echo 'AGENTCORE_RUNTIME_ENDPOINT=$(cd ${{ github.workspace }}/infra && terraform output -raw agent_runtime_endpoint)' > .env.local" >> "$GITHUB_STEP_SUMMARY"
           echo "npm run dev" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  # ────────────────────────────────────────────────────────────
+  # Job 3: Sync Secrets — runs AFTER Terraform so the secrets
+  # always exist before we write values into them. This fixes the
+  # race condition that caused keys to be lost after destroy+redeploy.
+  # ────────────────────────────────────────────────────────────
+  sync-secrets:
+    name: Sync API Keys to Secrets Manager
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [terraform-deploy]
+
+    steps:
+      - name: Sync Anthropic API key
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          SECRET_ID="${{ env.PROJECT_NAME }}-${{ env.TF_ENVIRONMENT }}/anthropic-api-key"
+          echo "Writing Anthropic API key to Secrets Manager..."
+          aws secretsmanager put-secret-value \
+            --secret-id "$SECRET_ID" \
+            --secret-string "$ANTHROPIC_API_KEY"
+          echo "✅ Anthropic API key synced"
+
+      - name: Sync GitHub PAT
+        # GH_PAT is optional — skip silently if not configured
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -z "$GH_PAT" ]; then
+            echo "ℹ️ GH_PAT secret not configured — skipping GitHub PAT sync"
+            echo "   Add GH_PAT to your GitHub Actions secrets to enable submit_pr"
+            exit 0
+          fi
+          SECRET_ID="${{ env.PROJECT_NAME }}-${{ env.TF_ENVIRONMENT }}/github-pat"
+          echo "Writing GitHub PAT to Secrets Manager..."
+          aws secretsmanager put-secret-value \
+            --secret-id "$SECRET_ID" \
+            --secret-string "$GH_PAT"
+          echo "✅ GitHub PAT synced — submit_pr tool will use this token"

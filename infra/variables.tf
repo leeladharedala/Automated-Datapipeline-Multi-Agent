@@ -60,7 +60,7 @@ variable "github_token_secret_arn" {
 variable "github_target_repo" {
   description = "GitHub repo where the agent creates PRs, in org/repo format (e.g. myorg/infra-repo)"
   type        = string
-  default     = "your-org/your-target-repo" # ← change this
+  default     = "leeladharedala/Automated-data-pipeline"
 }
 
 variable "github_base_branch" {
