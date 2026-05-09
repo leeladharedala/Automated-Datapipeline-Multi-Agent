@@ -511,14 +511,12 @@ def _is_session_inactive_error(exc: Exception) -> bool:
 
 
 def _fix(state: DataEngState, agent, fallback_agent=None, thread_id: str | None = None) -> dict[str, Any]:
-    """Agent node: fix validation failures using Code Interpreter + browser tools.
+    """Agent node: fix validation failures using pure-LLM code correction.
 
-    Accepts a pre-built agent so the same toolkit instance (and thus the same
-    MicroVM session) is reused across validate/fix cycles within a pipeline run.
-
-    If the Code Interpreter session has expired (ValidationException: session not
-    active), falls back to a pure-LLM fix using the code already stored in
-    state['code_content'] — no MicroVM access needed.
+    Since _validate now runs as pure Python AST checks (no Code Interpreter),
+    _fix also works purely from state — it reads the validation error and the
+    current broken code from state['code_content'] and asks the LLM to produce
+    corrected fenced code blocks. No MicroVM filesystem access needed.
     """
     attempt = state.get("attempt", 0) + 1
     error_output = state.get("validation_output", "")
@@ -531,13 +529,21 @@ def _fix(state: DataEngState, agent, fallback_agent=None, thread_id: str | None 
         for col in inferred_schema.get("columns", [])
     ] if inferred_schema else []
 
+    # Build a message that includes the current broken code so the LLM can
+    # fix it directly without needing any filesystem or sandbox access.
     user_msg = f"## Original Task\n{task}\n\n"
     if schema_lines:
         user_msg += "## Inferred Schema\n" + "\n".join(schema_lines) + "\n\n"
+    user_msg += f"## Validation Error (attempt {attempt})\n{error_output}\n\n"
+    user_msg += "## Current File Contents\n"
+    for fname, content in code_content.items():
+        if content:
+            user_msg += f"\n### {fname}\n```python\n{content}\n```\n"
+        else:
+            user_msg += f"\n### {fname}\n(empty — needs to be generated)\n"
     user_msg += (
-        f"## Pytest Failure (attempt {attempt})\n{error_output}\n\n"
-        "Fix the broken transformation files in /tmp/transformations/ using execute_code, "
-        "then respond with the corrected content in fenced code blocks as instructed."
+        "\nFix the code above so it passes all validation checks. "
+        "Respond with the corrected content in fenced code blocks as instructed."
     )
 
     response = None
@@ -547,39 +553,7 @@ def _fix(state: DataEngState, agent, fallback_agent=None, thread_id: str | None 
         "agent.role": "debugger",
         "agent.attempt": attempt,
     }):
-        try:
-            response = _invoke_agent(agent, user_msg, thread_id=thread_id)
-        except Exception as exc:
-            if not _is_session_inactive_error(exc):
-                raise
-
-            # Session expired — fall back to pure-LLM fix without Code Interpreter.
-            logger.warning(
-                "Code Interpreter session inactive during fix (attempt %d), "
-                "falling back to pure-LLM fix: %s",
-                attempt, exc,
-            )
-
-            # Build a fallback message that includes the current broken code so
-            # the LLM can fix it without needing MicroVM filesystem access.
-            fallback_msg = f"## Original Task\n{task}\n\n"
-            if schema_lines:
-                fallback_msg += "## Inferred Schema\n" + "\n".join(schema_lines) + "\n\n"
-            fallback_msg += f"## Validation Error (attempt {attempt})\n{error_output}\n\n"
-            fallback_msg += "## Current File Contents\n"
-            for fname, content in code_content.items():
-                if content:
-                    fallback_msg += f"\n### {fname}\n```python\n{content}\n```\n"
-            fallback_msg += (
-                "\nFix the code above so it passes validation. "
-                "Respond with the corrected content in fenced code blocks as instructed."
-            )
-
-            # Use the fallback (browser-only) agent if provided, otherwise reuse
-            # the main agent — it will just skip any execute_code calls since the
-            # session is gone and the prompt doesn't ask for them.
-            fix_agent_to_use = fallback_agent if fallback_agent is not None else agent
-            response = _invoke_agent(fix_agent_to_use, fallback_msg)
+        response = _invoke_agent(agent, user_msg)
 
     # Parse corrected code blocks from the fix response and update code_content in state
     fixed_content = _parse_code_blocks(response or "")
@@ -662,31 +636,13 @@ def build_data_eng_graph(model, tools=None):
     Returns:
         A compiled LangGraph StateGraph ready for invocation as a CompiledSubAgent.
     """
-    import uuid
     browser_tools = tools or []
 
-    # Load Code Interpreter tools for validate/fix nodes (execute_code,
-    # install_packages, write_files, etc.)
-    from src.sandbox import get_code_interpreter_tools, get_local_shell_backend
-    ci_tools = get_code_interpreter_tools()
-    get_local_shell_backend()  # ensure LocalShellBackend is initialised
-
-    # Stable thread_id for this pipeline run — ensures all validate/fix calls
-    # reuse the same Code Interpreter MicroVM session instead of starting a
-    # new one per invocation (which adds ~1s latency each time).
-    ci_thread_id = f"data-eng-{uuid.uuid4()}"
-
-    # Build agents ONCE per pipeline run and close over them in the node
-    # lambdas below. This is the critical fix for session churn: the Code
-    # Interpreter toolkit caches sessions keyed on (thread_id, tool_instance_id).
-    # If a new agent is created per call, the tool_instance_id changes every
-    # time → cache miss → new MicroVM session on every LLM call.
+    # validate uses pure Python AST — no Code Interpreter or agent needed.
+    # fix uses pure LLM from state['code_content'] — no Code Interpreter needed.
+    # Neither node requires the Code Interpreter toolkit or a MicroVM session.
     generate_agent = _build_agent(model, browser_tools, _GENERATE_PROMPT)
-    # validate node uses pure-Python AST check — no agent needed
-    fix_agent = _build_agent(model, browser_tools + ci_tools, _FIX_PROMPT)
-    # Fallback agent used when the Code Interpreter session has expired: browser
-    # tools only, fixes code purely from state without MicroVM filesystem access.
-    fallback_fix_agent = _build_agent(model, browser_tools, _FIX_FALLBACK_PROMPT)
+    fix_agent = _build_agent(model, browser_tools, _FIX_FALLBACK_PROMPT)
 
     graph = StateGraph(DataEngState)
 
@@ -694,15 +650,13 @@ def build_data_eng_graph(model, tools=None):
         return _sample_data(state, model)
 
     def generate(state: DataEngState) -> dict[str, Any]:
-        # Generate is pure LLM + browser tools — no Code Interpreter needed.
-        # Code content is stored in state and written to MicroVM by validate.
         return _generate(state, generate_agent, tool_count=len(browser_tools))
 
     def validate(state: DataEngState) -> dict[str, Any]:
         return _validate(state)
 
     def fix(state: DataEngState) -> dict[str, Any]:
-        return _fix(state, fix_agent, fallback_agent=fallback_fix_agent, thread_id=ci_thread_id)
+        return _fix(state, fix_agent)
 
     def report(state: DataEngState) -> dict[str, Any]:
         return _report(state)
