@@ -66,11 +66,11 @@ _FIX_PROMPT = """\
 You are a data engineering debugging expert. You have access to execute_code \
 (Code Interpreter tool) and browser tools.
 
-The files are already in /src/transformations/ in the MicroVM. \
+The files are already in /tmp/transformations/ in the MicroVM. \
 Use execute_code to read and fix them:
 
-To read: execute_code with: print(open('/src/transformations/transform.py').read())
-To fix:  execute_code with: open('/src/transformations/transform.py', 'w').write(new_code)
+To read: execute_code with: print(open('/tmp/transformations/transform.py').read())
+To fix:  execute_code with: open('/tmp/transformations/transform.py', 'w').write(new_code)
 
 After fixing, respond with the corrected file content in fenced code blocks:
 
@@ -366,8 +366,8 @@ def _generate(state: DataEngState, agent, tool_count: int = 0) -> dict[str, Any]
 
     code_content = _parse_code_blocks(response)
     code_artifacts = {
-        "transform.py": "/src/transformations/transform.py",
-        "__init__.py": "/src/transformations/__init__.py",
+        "transform.py": "/tmp/transformations/transform.py",
+        "__init__.py": "/tmp/transformations/__init__.py",
     }
     return {
         "code_artifacts": code_artifacts,
@@ -380,7 +380,7 @@ _VALIDATE_PROMPT = """\
 You are a code structure validator. You have access to execute_code \
 (Code Interpreter tool) which runs Python in an isolated MicroVM sandbox.
 
-The generated code has already been written to /src/transformations/ in the \
+The generated code has already been written to /tmp/transformations/ in the \
 MicroVM. Run the following validation script using execute_code:
 
 ```python
@@ -389,12 +389,12 @@ import ast, sys, os
 errors = []
 func_names = []
 
-required = ["/src/transformations/transform.py", "/src/transformations/__init__.py"]
+required = ["/tmp/transformations/transform.py", "/tmp/transformations/__init__.py"]
 for f in required:
     if not os.path.exists(f):
         errors.append(f"MISSING: {f}")
 
-tf = "/src/transformations/transform.py"
+tf = "/tmp/transformations/transform.py"
 if os.path.exists(tf):
     source = open(tf).read()
     try:
@@ -417,7 +417,7 @@ if os.path.exists(tf):
         if not has_pyspark:
             errors.append("NO pyspark imports found - expected PySpark DataFrame code")
 
-init = "/src/transformations/__init__.py"
+init = "/tmp/transformations/__init__.py"
 if os.path.exists(init):
     try:
         ast.parse(open(init).read())
@@ -439,7 +439,7 @@ Report the full output. State clearly whether validation PASSED or FAILED.
 """
 
 
-def _validate(state: DataEngState, agent, thread_id: str | None = None) -> dict[str, Any]:
+def _validate(state: DataEngState, agent, thread_id: str | None = None, model=None) -> dict[str, Any]:
     """Agent node: write generated code into MicroVM then run structural validation.
 
     The generate node stores code as text in state['code_content'].
@@ -463,13 +463,13 @@ def _validate(state: DataEngState, agent, thread_id: str | None = None) -> dict[
     # and all other special characters that break triple-quote embedding.
     setup_code = (
         "import os\n"
-        "os.makedirs('/src/transformations', exist_ok=True)\n"
-        f'with open("/src/transformations/transform.py", "w") as f:\n'
+        "os.makedirs('/tmp/transformations', exist_ok=True)\n"
+        f'with open("/tmp/transformations/transform.py", "w") as f:\n'
         f'    f.write({repr(transform_code)})\n'
-        f'with open("/src/transformations/__init__.py", "w") as f:\n'
+        f'with open("/tmp/transformations/__init__.py", "w") as f:\n'
         f'    f.write({repr(init_code)})\n'
-        "print('Files written to /src/transformations/')\n"
-        "print(os.listdir('/src/transformations/'))\n"
+        "print('Files written to /tmp/transformations/')\n"
+        "print(os.listdir('/tmp/transformations/'))\n"
     )
 
     user_msg = (
@@ -488,7 +488,30 @@ def _validate(state: DataEngState, agent, thread_id: str | None = None) -> dict[
         }):
             response = _invoke_agent(agent, user_msg, thread_id=thread_id)
     except Exception as exc:
-        response = str(exc)
+        # If the Code Interpreter session expired, attempt to restart it once.
+        # A fresh session means the files need to be re-written, which the
+        # validate prompt already handles (Step 1 writes files, Step 2 validates).
+        # Any other exception is surfaced as a validation failure so the graph
+        # can route to fix/report rather than crashing.
+        if _is_session_inactive_error(exc):
+            logger.warning(
+                "Code Interpreter session inactive during validate, "
+                "attempting session restart: %s", exc,
+            )
+            try:
+                from src.sandbox import reset_code_interpreter_tools
+                new_ci_tools = reset_code_interpreter_tools()
+                if new_ci_tools and model is not None:
+                    # Rebuild the agent with the fresh session tools and retry once.
+                    new_agent = _build_agent(model, new_ci_tools, _VALIDATE_PROMPT)
+                    response = _invoke_agent(new_agent, user_msg, thread_id=thread_id)
+                else:
+                    response = f"VALIDATION: FAILED\nCode Interpreter session expired and could not be restarted: {exc}"
+            except Exception as restart_exc:
+                logger.warning("Session restart failed: %s", restart_exc)
+                response = f"VALIDATION: FAILED\nCode Interpreter session expired: {exc}"
+        else:
+            response = str(exc)
 
     output = response
     upper = output.upper()
@@ -508,46 +531,121 @@ def _validate(state: DataEngState, agent, thread_id: str | None = None) -> dict[
     }
 
 
-def _fix(state: DataEngState, agent, thread_id: str | None = None) -> dict[str, Any]:
+_FIX_FALLBACK_PROMPT = """\
+You are a data engineering debugging expert. You do NOT have access to a live \
+Code Interpreter session right now, so you must fix the code purely from the \
+source provided below.
+
+You will receive:
+- The original task description
+- The current (broken) file contents
+- The validation error output
+
+Your job:
+1. Analyze the error and identify the root cause
+2. Produce corrected file content in fenced code blocks:
+
+```python:transform.py
+<corrected transform.py content>
+```
+
+```python:__init__.py
+<corrected __init__.py content>
+```
+
+Common issues: missing main() entry point, syntax errors, missing pyspark imports.
+"""
+
+
+def _is_session_inactive_error(exc: Exception) -> bool:
+    """Return True if the exception is a Code Interpreter session-not-active error."""
+    msg = str(exc)
+    return (
+        "ValidationException" in msg
+        and "not active" in msg
+    ) or "Code interpreter session" in msg
+
+
+def _fix(state: DataEngState, agent, fallback_agent=None, thread_id: str | None = None) -> dict[str, Any]:
     """Agent node: fix validation failures using Code Interpreter + browser tools.
 
     Accepts a pre-built agent so the same toolkit instance (and thus the same
     MicroVM session) is reused across validate/fix cycles within a pipeline run.
+
+    If the Code Interpreter session has expired (ValidationException: session not
+    active), falls back to a pure-LLM fix using the code already stored in
+    state['code_content'] — no MicroVM access needed.
     """
     attempt = state.get("attempt", 0) + 1
     error_output = state.get("validation_output", "")
     task = get_task_description(state)
     inferred_schema = state.get("inferred_schema", {})
+    code_content = state.get("code_content", {})
+
+    schema_lines = [
+        f"- {col['name']} ({col['type']}, nullable={col['nullable']})"
+        for col in inferred_schema.get("columns", [])
+    ] if inferred_schema else []
 
     user_msg = f"## Original Task\n{task}\n\n"
-    if inferred_schema and inferred_schema.get("columns"):
-        schema_lines = [
-            f"- {col['name']} ({col['type']}, nullable={col['nullable']})"
-            for col in inferred_schema["columns"]
-        ]
+    if schema_lines:
         user_msg += "## Inferred Schema\n" + "\n".join(schema_lines) + "\n\n"
     user_msg += (
         f"## Pytest Failure (attempt {attempt})\n{error_output}\n\n"
-        "Fix the broken transformation files in /src/transformations/ using execute_code, "
+        "Fix the broken transformation files in /tmp/transformations/ using execute_code, "
         "then respond with the corrected content in fenced code blocks as instructed."
     )
+
+    response = None
     with traced_span("agent:data_eng.fix", {
         "agent.graph": "data_eng",
         "agent.node": "fix",
         "agent.role": "debugger",
         "agent.attempt": attempt,
     }):
-        response = _invoke_agent(agent, user_msg, thread_id=thread_id)
+        try:
+            response = _invoke_agent(agent, user_msg, thread_id=thread_id)
+        except Exception as exc:
+            if not _is_session_inactive_error(exc):
+                raise
+
+            # Session expired — fall back to pure-LLM fix without Code Interpreter.
+            logger.warning(
+                "Code Interpreter session inactive during fix (attempt %d), "
+                "falling back to pure-LLM fix: %s",
+                attempt, exc,
+            )
+
+            # Build a fallback message that includes the current broken code so
+            # the LLM can fix it without needing MicroVM filesystem access.
+            fallback_msg = f"## Original Task\n{task}\n\n"
+            if schema_lines:
+                fallback_msg += "## Inferred Schema\n" + "\n".join(schema_lines) + "\n\n"
+            fallback_msg += f"## Validation Error (attempt {attempt})\n{error_output}\n\n"
+            fallback_msg += "## Current File Contents\n"
+            for fname, content in code_content.items():
+                if content:
+                    fallback_msg += f"\n### {fname}\n```python\n{content}\n```\n"
+            fallback_msg += (
+                "\nFix the code above so it passes validation. "
+                "Respond with the corrected content in fenced code blocks as instructed."
+            )
+
+            # Use the fallback (browser-only) agent if provided, otherwise reuse
+            # the main agent — it will just skip any execute_code calls since the
+            # session is gone and the prompt doesn't ask for them.
+            fix_agent_to_use = fallback_agent if fallback_agent is not None else agent
+            response = _invoke_agent(fix_agent_to_use, fallback_msg)
 
     # Parse corrected code blocks from the fix response and update code_content in state
-    fixed_content = _parse_code_blocks(response)
+    fixed_content = _parse_code_blocks(response or "")
     current_content = state.get("code_content", {})
     updated_content = {**current_content, **fixed_content}
 
     return {
         "attempt": attempt,
         "code_content": updated_content,
-        "messages": [AIMessage(content=response)],
+        "messages": [AIMessage(content=response or "")],
     }
 
 
@@ -642,6 +740,9 @@ def build_data_eng_graph(model, tools=None):
     generate_agent = _build_agent(model, browser_tools, _GENERATE_PROMPT)
     validate_agent = _build_agent(model, ci_tools, _VALIDATE_PROMPT)
     fix_agent = _build_agent(model, browser_tools + ci_tools, _FIX_PROMPT)
+    # Fallback agent used when the Code Interpreter session has expired: browser
+    # tools only, fixes code purely from state without MicroVM filesystem access.
+    fallback_fix_agent = _build_agent(model, browser_tools, _FIX_FALLBACK_PROMPT)
 
     graph = StateGraph(DataEngState)
 
@@ -654,10 +755,10 @@ def build_data_eng_graph(model, tools=None):
         return _generate(state, generate_agent, tool_count=len(browser_tools))
 
     def validate(state: DataEngState) -> dict[str, Any]:
-        return _validate(state, validate_agent, thread_id=ci_thread_id)
+        return _validate(state, validate_agent, thread_id=ci_thread_id, model=model)
 
     def fix(state: DataEngState) -> dict[str, Any]:
-        return _fix(state, fix_agent, thread_id=ci_thread_id)
+        return _fix(state, fix_agent, fallback_agent=fallback_fix_agent, thread_id=ci_thread_id)
 
     def report(state: DataEngState) -> dict[str, Any]:
         return _report(state)

@@ -22,6 +22,24 @@ _code_interpreter_cache: dict = {}
 _local_shell_cache: dict = {}
 
 
+def reset_code_interpreter_tools() -> list:
+    """Clear the Code Interpreter cache and start a fresh session.
+
+    Called when the existing session is detected as inactive
+    (ValidationException: session not active). Clears the cached tools
+    and toolkit, then calls get_code_interpreter_tools() to spin up a
+    new MicroVM session.
+
+    The background event loop is intentionally preserved — it is long-lived
+    and shared with _invoke_agent in data_eng_graph. Only the toolkit and
+    tools entries are cleared so a new session is created on the same loop.
+    """
+    _code_interpreter_cache.pop("tools", None)
+    _code_interpreter_cache.pop("toolkit", None)
+    logger.info("Code Interpreter cache cleared — starting fresh session")
+    return get_code_interpreter_tools()
+
+
 def get_code_interpreter_tools() -> list:
     """Get or create Code Interpreter tools for data-eng validation.
 

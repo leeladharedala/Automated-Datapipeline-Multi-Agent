@@ -126,55 +126,48 @@ You will receive the validation error output. Your job:
 
 
 
-def _build_agent(model, tools: list, system_prompt: str, backend=None):
-    """Build a single DeepAgent instance with checkpointing disabled.
+def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend=None,
+               _bg_loop_cache: dict | None = None) -> str:
+    """Create a mini DeepAgent, invoke it, and return the final AI message text.
 
-    Agents must be built once per pipeline run and reused across node
-    invocations to avoid unnecessary re-instantiation overhead.
+    This gives the agent access to the full DeepAgent tool stack:
+    write_file, edit_file, read_file, execute, ls, glob, grep.
+    Tools passed via the `tools` parameter are added on top.
+    Pass a backend (e.g. AgentCoreSandbox) to enable the execute tool.
+
+    Uses ainvoke (async) to support tools that only implement async invocation
+    (e.g. MCP StructuredTools from langchain-mcp-adapters).
+
+    Schedules work on a long-lived background loop (passed via _bg_loop_cache)
+    when available, to avoid "Event loop is closed" errors from httpx cleanup
+    after asyncio.run() tears down a short-lived loop.
     """
+    import asyncio
     from deepagents import create_deep_agent
+
     kwargs = dict(
         model=model,
         system_prompt=system_prompt,
-        tools=tools,
-        checkpointer=False,
+        tools=tools or [],
     )
     if backend is not None:
         kwargs["backend"] = backend
-    return create_deep_agent(**kwargs)
+    kwargs["checkpointer"] = False  # disable checkpointing for inner agents
 
-
-def _invoke_agent(agent, user_message: str, bg_loop_cache: dict | None = None) -> str:
-    """Invoke a pre-built agent and return the final AI message text.
-
-    Schedules work on a long-lived background loop via run_coroutine_threadsafe
-    so that the loop is never closed between calls — avoids httpx TLS cleanup
-    errors that occur when asyncio.run() tears down a short-lived loop.
-    """
-    import asyncio
-    import threading
+    agent = create_deep_agent(**kwargs)
 
     async def _ainvoke():
         return await agent.ainvoke({"messages": [HumanMessage(content=user_message)]})
 
-    cache = bg_loop_cache or {}
+    # Use the caller-supplied background loop when available so that the loop
+    # is never closed between calls (avoids httpx TLS cleanup errors).
+    bg_loop = (_bg_loop_cache or {}).get("loop")
+    if bg_loop is not None and bg_loop.is_running():
+        result = asyncio.run_coroutine_threadsafe(_ainvoke(), bg_loop).result()
+    else:
+        result = asyncio.run(_ainvoke())
 
-    # Ensure a long-lived background loop exists — never use asyncio.run().
-    if "loop" not in cache or not cache["loop"].is_running():
-        _ready = threading.Event()
-        _bg_loop = asyncio.new_event_loop()
-
-        def _run_bg():
-            asyncio.set_event_loop(_bg_loop)
-            _bg_loop.call_soon_threadsafe(_ready.set)
-            _bg_loop.run_forever()
-
-        threading.Thread(target=_run_bg, daemon=True).start()
-        _ready.wait(timeout=5)
-        cache["loop"] = _bg_loop
-
-    result = asyncio.run_coroutine_threadsafe(_ainvoke(), cache["loop"]).result()
-
+    # Extract the last AI message
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
             from src.graphs._utils import _content_to_str
@@ -182,22 +175,16 @@ def _invoke_agent(agent, user_message: str, bg_loop_cache: dict | None = None) -
     return ""
 
 
-def _research(state: IaCState, agent, tools_cache: dict, original_model=None) -> dict[str, Any]:
-    """Agent node: invoke pre-built research agent with MCP tools.
+def _research(state: IaCState, model, tools_cache: dict) -> dict[str, Any]:
+    """Agent node: create_deep_agent with MCP tools to research AWS resource schemas.
 
-    If no tools were loaded at graph build time, lazily loads them from the
+    Uses Sonnet 4.6 to intelligently call Terraform Registry and AWS Docs MCP
+    tools with the correct input schemas, extracting resource types, arguments,
+    and best practices needed for code generation.
+
+    If no tools were provided at graph build time, lazily loads them from the
     Terraform Registry and AWS Docs MCP servers on first invocation. The loaded
-    tools and loop are cached in tools_cache for subsequent calls.
-
-    NOTE: When tools are lazy-loaded, the research agent cannot be pre-built
-    (tools aren't available at factory time), so a one-time agent build happens
-    here. The agent is then cached in tools_cache["agent"] for reuse.
-
-    Args:
-        original_model: The original LLM model instance (e.g. ChatAnthropic) used
-            to rebuild the research agent when tools are lazy-loaded. Required
-            because `agent` is a CompiledStateGraph and cannot be passed as a
-            model to create_deep_agent.
+    tools and client are cached in tools_cache for subsequent calls.
     """
     task = get_task_description(state)
     if not task:
@@ -210,13 +197,17 @@ def _research(state: IaCState, agent, tools_cache: dict, original_model=None) ->
             from src.tools.gateway import load_gateway_tools
             import threading
             logger.info("Lazy-loading Terraform Registry + AWS Docs MCP tools...")
+            # MCP stdio clients need a running event loop for the lifetime
+            # of the subprocess connections.  Spin up a dedicated loop in a
+            # background daemon thread and load tools on it.
             loop = asyncio.new_event_loop()
 
             def _run_loop():
                 asyncio.set_event_loop(loop)
                 loop.run_forever()
 
-            threading.Thread(target=_run_loop, daemon=True).start()
+            t = threading.Thread(target=_run_loop, daemon=True)
+            t.start()
 
             future = asyncio.run_coroutine_threadsafe(load_gateway_tools(), loop)
             clients, active_tools = future.result(timeout=120)
@@ -232,30 +223,18 @@ def _research(state: IaCState, agent, tools_cache: dict, original_model=None) ->
     if not active_tools:
         return {"research_context": "No research tools available."}
 
-    # If tools were lazy-loaded, the pre-built agent had no tools — build+cache once.
-    # Use the original model (ChatAnthropic instance) rather than the compiled agent
-    # graph, which is a CompiledStateGraph and cannot be passed as a model string.
-    active_agent = tools_cache.get("agent") or agent
-    if not tools_cache.get("agent"):
-        if original_model is None:
-            raise ValueError(
-                "Cannot rebuild research agent: original_model is required "
-                "when tools are lazy-loaded (the pre-built agent is a "
-                "CompiledStateGraph, not a model)."
-            )
-        active_agent = _build_agent(original_model, active_tools, _RESEARCH_PROMPT)
-        tools_cache["agent"] = active_agent
-
     with traced_span("agent:iac.research", {
         "agent.graph": "iac",
         "agent.node": "research",
         "agent.role": "researcher",
         "agent.tool_count": len(active_tools),
     }):
-        response = _invoke_agent(
-            active_agent,
+        response = _run_agent(
+            _RESEARCH_PROMPT,
             f"## Task\n{task}\n\nResearch the AWS resources and Terraform configuration needed for this task.",
-            bg_loop_cache=tools_cache,
+            model,
+            tools=active_tools,
+            _bg_loop_cache=tools_cache,
         )
     return {"research_context": response, "messages": [AIMessage(content=response)]}
 
@@ -291,13 +270,13 @@ def _parse_hcl_blocks(response: str) -> dict[str, str]:
     return content
 
 
-def _generate(state: IaCState, agent, bg_loop_cache: dict | None = None) -> dict[str, Any]:
+def _generate(state: IaCState, model, _bg_loop_cache: dict | None = None) -> dict[str, Any]:
     """Agent node: generate Terraform HCL files and store content in state.
 
-    Accepts a pre-built agent so the same instance is reused across calls.
     The generated code is stored in state['tf_content'] as a dict of
     {filename: content}. The validate node reads this and writes the files
-    into the sandbox before running terraform plan.
+    into the sandbox before running terraform plan — this bridges the
+    filesystem gap between the generate node (VFS) and the sandbox.
     """
     task = get_task_description(state)
     research = state.get("research_context", "")
@@ -309,9 +288,11 @@ def _generate(state: IaCState, agent, bg_loop_cache: dict | None = None) -> dict
         "agent.role": "code_generator",
         "agent.research_context_length": len(research),
     }):
-        response = _invoke_agent(agent, user_msg, bg_loop_cache=bg_loop_cache)
+        response = _run_agent(_GENERATE_PROMPT, user_msg, model, _bg_loop_cache=_bg_loop_cache)
 
     tf_content = _parse_hcl_blocks(response)
+
+    # Track the expected artifact filenames
     tf_artifacts = {
         "provider.tf": "/infra/provider.tf",
         "variables.tf": "/infra/variables.tf",
@@ -325,19 +306,21 @@ def _generate(state: IaCState, agent, bg_loop_cache: dict | None = None) -> dict
     }
 
 
-def _validate(state: IaCState, agent, bg_loop_cache: dict | None = None) -> dict[str, Any]:
-    """Agent node: write generated Terraform files into sandbox then run terraform plan.
-
-    Accepts a pre-built agent so the same instance is reused across validate/fix cycles.
-    """
+def _validate(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None = None) -> dict[str, Any]:
+    """Agent node: write generated Terraform files into sandbox then run terraform plan."""
     task = get_task_description(state)
     research = state.get("research_context", "")
     artifacts = state.get("tf_artifacts", {})
     tf_content = state.get("tf_content", {})
 
+    # Build shell commands that write the generated files into the sandbox.
+    # Use printf with %s to safely embed arbitrary HCL content without
+    # shell quoting issues — repr() gives us a Python string literal which
+    # we then pass via python -c to write the file.
     write_cmds = "mkdir -p /infra"
     for fname in ["provider.tf", "variables.tf", "main.tf", "outputs.tf"]:
         content = tf_content.get(fname, "")
+        # Use python3 -c to write the file — avoids all shell quoting issues
         escaped = repr(content)
         write_cmds += f" && python3 -c \"open('/infra/{fname}', 'w').write({escaped})\""
 
@@ -359,14 +342,18 @@ def _validate(state: IaCState, agent, bg_loop_cache: dict | None = None) -> dict
         "agent.node": "validate",
         "agent.role": "validator",
     }):
-        response = _invoke_agent(agent, user_msg, bg_loop_cache=bg_loop_cache)
+        response = _run_agent(_VALIDATE_PROMPT, user_msg, model, backend=sandbox,
+                              _bg_loop_cache=_bg_loop_cache)
 
+    # Check for explicit PASSED/FAILED keywords from the prompt.
+    # Avoid matching generic "success" which can appear in failure context.
     upper = response.upper()
     if "VALIDATION FAILED" in upper or "VALIDATION: FAILED" in upper:
         passed = False
     elif "VALIDATION PASSED" in upper or "VALIDATION: PASSED" in upper:
         passed = True
     else:
+        # Fallback: absence of explicit FAILED with presence of PASSED
         passed = "PASSED" in upper and "FAILED" not in upper
     return {
         "validation_passed": passed,
@@ -374,11 +361,8 @@ def _validate(state: IaCState, agent, bg_loop_cache: dict | None = None) -> dict
     }
 
 
-def _fix(state: IaCState, agent, bg_loop_cache: dict | None = None) -> dict[str, Any]:
-    """Agent node: fix broken Terraform files.
-
-    Accepts a pre-built agent so the same instance is reused across validate/fix cycles.
-    """
+def _fix(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None = None) -> dict[str, Any]:
+    """Agent node: fix broken Terraform files using sandbox execute + browser tools."""
     attempt = state.get("attempt", 0) + 1
     error_output = state.get("validation_output", "")
     task = get_task_description(state)
@@ -401,8 +385,10 @@ def _fix(state: IaCState, agent, bg_loop_cache: dict | None = None) -> dict[str,
         "agent.role": "debugger",
         "agent.attempt": attempt,
     }):
-        response = _invoke_agent(agent, user_msg, bg_loop_cache=bg_loop_cache)
+        response = _run_agent(_FIX_PROMPT, user_msg, model, backend=sandbox,
+                              _bg_loop_cache=_bg_loop_cache)
 
+    # Parse corrected HCL blocks and update tf_content in state
     fixed_content = _parse_hcl_blocks(response)
     current_content = state.get("tf_content", {})
     updated_content = {**current_content, **fixed_content}
@@ -481,9 +467,6 @@ def _should_retry_or_report(state: IaCState) -> str:
 def build_iac_graph(model, tools=None):
     """Factory: build and compile the IaC SubAgent StateGraph.
 
-    Agents are built ONCE here and reused across all node invocations to
-    avoid unnecessary re-instantiation overhead per call.
-
     Args:
         model: A ChatAnthropic (or compatible) LLM instance.
         tools: Optional list of Gateway MCP tools for resource schema research.
@@ -493,35 +476,25 @@ def build_iac_graph(model, tools=None):
     """
     graph = StateGraph(IaCState)
 
-    # Cache for lazily-loaded MCP tools (loaded once on first research call).
-    # The research agent may be rebuilt here if tools are lazy-loaded — see _research().
+    # Closures capture model and tools from factory args
+    # Cache for lazily-loaded MCP tools (loaded once on first research call)
     _cached_tools: dict[str, Any] = {"tools": tools or [], "clients": None}
 
-    # Load local shell backend (terraform pre-installed in container)
+    # Load Code Interpreter sandbox for validate/fix nodes
     from src.sandbox import get_local_shell_backend
     sandbox = get_local_shell_backend()
 
-    # Build agents ONCE per pipeline run and close over them in node lambdas.
-    # research_agent: MCP tools for Terraform Registry + AWS Docs lookup.
-    # generate_agent: no external tools — pure LLM HCL generation.
-    # validate_agent: LocalShellBackend for terraform init/plan.
-    # fix_agent: LocalShellBackend for reading + fixing files.
-    research_agent = _build_agent(model, tools or [], _RESEARCH_PROMPT)
-    generate_agent = _build_agent(model, [], _GENERATE_PROMPT)
-    validate_agent = _build_agent(model, [], _VALIDATE_PROMPT, backend=sandbox)
-    fix_agent = _build_agent(model, [], _FIX_PROMPT, backend=sandbox)
-
     def research(state: IaCState) -> dict[str, Any]:
-        return _research(state, research_agent, _cached_tools, original_model=model)
+        return _research(state, model, _cached_tools)
 
     def generate(state: IaCState) -> dict[str, Any]:
-        return _generate(state, generate_agent, bg_loop_cache=_cached_tools)
+        return _generate(state, model, _cached_tools)
 
     def validate(state: IaCState) -> dict[str, Any]:
-        return _validate(state, validate_agent, bg_loop_cache=_cached_tools)
+        return _validate(state, model, sandbox=sandbox, _bg_loop_cache=_cached_tools)
 
     def fix(state: IaCState) -> dict[str, Any]:
-        return _fix(state, fix_agent, bg_loop_cache=_cached_tools)
+        return _fix(state, model, sandbox=sandbox, _bg_loop_cache=_cached_tools)
 
     def report(state: IaCState) -> dict[str, Any]:
         return _report(state)
