@@ -47,7 +47,8 @@ env:
   TF_LOCK_TABLE: ${{ vars.TF_LOCK_TABLE || 'multi-agent-pipeline-tfstate-locks' }}
   
   # Terraform automatically picks up variables prefixed with TF_VAR_
-  TF_VAR_github_token_secret_arn: ${{ secrets.PAT_SECRET_ARN }}
+  # PAT_SECRET_ARN is intentionally omitted — Terraform creates its own
+  # github-pat secret. The actual token value is synced in sync-secrets job via GH_PAT.
   TF_VAR_github_target_repo: ${{ vars.TARGET_REPO }}
 
 jobs:
