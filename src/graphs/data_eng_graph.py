@@ -288,31 +288,36 @@ def _sample_data(state: DataEngState, model, backend=None, ci_tools=None) -> dic
 
 
 def _parse_code_blocks(response: str) -> dict[str, str]:
-    """Extract named fenced code blocks from the generate response.
+    """Extract named fenced code blocks from the generate/fix response.
 
-    Looks for blocks like:
-      ```python:transform.py
-      <content>
-      ```
+    Handles all fence formats the LLM may produce:
+      ```python:transform.py   <- named with language prefix (most common)
+      ```transform.py          <- named without language prefix
+      ```python                <- plain python block (fallback)
+      ```                      <- bare block (last resort)
+
     Returns a dict of {filename: content}.
-    Falls back to extracting the first two plain ```python blocks if
-    named blocks are not found.
+    Falls back to positional assignment (first block = transform.py,
+    second = __init__.py) when no named blocks are found.
     """
     import re as _re
     content: dict[str, str] = {}
 
-    # Try named blocks first: ```python:filename.py
-    named = _re.findall(r"```(?:python:)?([\w./]+\.py)\n(.*?)```", response, _re.DOTALL)
+    # Pass 1: named blocks with optional language prefix
+    # Matches: ```python:transform.py  OR  ```transform.py
+    named = _re.findall(
+        r"```(?:[a-zA-Z]+:)?([\w./]+\.py)\s*\n(.*?)```",
+        response,
+        _re.DOTALL,
+    )
     for fname, code in named:
-        # Strip the leading "python:" prefix if present in the filename match
-        fname = fname.lstrip("python:")
         content[fname] = code.strip()
 
     if "transform.py" in content:
         return content
 
-    # Fallback: grab all plain ```python blocks in order
-    plain = _re.findall(r"```(?:python)?\n(.*?)```", response, _re.DOTALL)
+    # Pass 2: plain ```python or ``` blocks — assign positionally
+    plain = _re.findall(r"```(?:python)?\s*\n(.*?)```", response, _re.DOTALL)
     if plain:
         content["transform.py"] = plain[0].strip()
     if len(plain) > 1:
@@ -365,6 +370,13 @@ def _generate(state: DataEngState, agent, tool_count: int = 0) -> dict[str, Any]
         response = _invoke_agent(agent, user_msg)
 
     code_content = _parse_code_blocks(response)
+    if not code_content.get("transform.py"):
+        logger.warning(
+            "generate: _parse_code_blocks found no transform.py in response "
+            "(response length=%d). Raw response prefix: %.200s",
+            len(response),
+            response,
+        )
     code_artifacts = {
         "transform.py": "/tmp/transformations/transform.py",
         "__init__.py": "/tmp/transformations/__init__.py",
@@ -510,14 +522,20 @@ def _is_session_inactive_error(exc: Exception) -> bool:
     ) or "Code interpreter session" in msg
 
 
-def _fix(state: DataEngState, agent, fallback_agent=None, thread_id: str | None = None) -> dict[str, Any]:
-    """Agent node: fix validation failures using pure-LLM code correction.
+def _fix(state: DataEngState, model) -> dict[str, Any]:
+    """Fix validation failures using a single stateless LLM call.
 
-    Since _validate now runs as pure Python AST checks (no Code Interpreter),
-    _fix also works purely from state — it reads the validation error and the
-    current broken code from state['code_content'] and asks the LLM to produce
-    corrected fenced code blocks. No MicroVM filesystem access needed.
+    Since _validate is pure Python AST (no Code Interpreter), _fix doesn't
+    need a DeepAgent or tool loop — it just needs one LLM call with the
+    broken code and the error. Using the model directly avoids:
+    - DeepAgent internal message history accumulating across fix attempts
+    - Growing context from repeated tool-use turns
+    - The 60k+ token blowup seen when fix_agent accumulates prior messages
     """
+    import asyncio
+    from src.sandbox import _code_interpreter_cache
+    from langchain_core.messages import SystemMessage
+
     attempt = state.get("attempt", 0) + 1
     error_output = state.get("validation_output", "")
     task = get_task_description(state)
@@ -529,8 +547,7 @@ def _fix(state: DataEngState, agent, fallback_agent=None, thread_id: str | None 
         for col in inferred_schema.get("columns", [])
     ] if inferred_schema else []
 
-    # Build a message that includes the current broken code so the LLM can
-    # fix it directly without needing any filesystem or sandbox access.
+    # Build a focused, minimal prompt — no accumulated history
     user_msg = f"## Original Task\n{task}\n\n"
     if schema_lines:
         user_msg += "## Inferred Schema\n" + "\n".join(schema_lines) + "\n\n"
@@ -546,24 +563,50 @@ def _fix(state: DataEngState, agent, fallback_agent=None, thread_id: str | None 
         "Respond with the corrected content in fenced code blocks as instructed."
     )
 
-    response = None
+    messages = [
+        SystemMessage(content=_FIX_FALLBACK_PROMPT),
+        HumanMessage(content=user_msg),
+    ]
+
     with traced_span("agent:data_eng.fix", {
         "agent.graph": "data_eng",
         "agent.node": "fix",
         "agent.role": "debugger",
         "agent.attempt": attempt,
     }):
-        response = _invoke_agent(agent, user_msg)
+        # Single stateless LLM call — no agent, no tool loop, no history accumulation
+        async def _ainvoke():
+            return await model.ainvoke(messages)
 
-    # Parse corrected code blocks from the fix response and update code_content in state
-    fixed_content = _parse_code_blocks(response or "")
-    current_content = state.get("code_content", {})
-    updated_content = {**current_content, **fixed_content}
+        # Use the shared background loop (same pattern as _invoke_agent)
+        if "loop" not in _code_interpreter_cache:
+            import threading
+            _ready = threading.Event()
+            _bg_loop = asyncio.new_event_loop()
+
+            def _run_bg():
+                asyncio.set_event_loop(_bg_loop)
+                _bg_loop.call_soon_threadsafe(_ready.set)
+                _bg_loop.run_forever()
+
+            threading.Thread(target=_run_bg, daemon=True).start()
+            _ready.wait(timeout=5)
+            _code_interpreter_cache["loop"] = _bg_loop
+
+        bg_loop = _code_interpreter_cache["loop"]
+        ai_msg = asyncio.run_coroutine_threadsafe(_ainvoke(), bg_loop).result()
+
+        from src.graphs._utils import _content_to_str
+        response = _content_to_str(ai_msg.content) if ai_msg.content else ""
+
+    # Parse corrected code blocks and merge into state
+    fixed_content = _parse_code_blocks(response)
+    updated_content = {**code_content, **fixed_content}
 
     return {
         "attempt": attempt,
         "code_content": updated_content,
-        "messages": [AIMessage(content=response or "")],
+        "messages": [AIMessage(content=response)],
     }
 
 
@@ -639,10 +682,9 @@ def build_data_eng_graph(model, tools=None):
     browser_tools = tools or []
 
     # validate uses pure Python AST — no Code Interpreter or agent needed.
-    # fix uses pure LLM from state['code_content'] — no Code Interpreter needed.
-    # Neither node requires the Code Interpreter toolkit or a MicroVM session.
+    # fix uses a single stateless model.ainvoke() call — no DeepAgent, no history
+    # accumulation, no token blowup across fix attempts.
     generate_agent = _build_agent(model, browser_tools, _GENERATE_PROMPT)
-    fix_agent = _build_agent(model, browser_tools, _FIX_FALLBACK_PROMPT)
 
     graph = StateGraph(DataEngState)
 
@@ -656,7 +698,7 @@ def build_data_eng_graph(model, tools=None):
         return _validate(state)
 
     def fix(state: DataEngState) -> dict[str, Any]:
-        return _fix(state, fix_agent)
+        return _fix(state, model)
 
     def report(state: DataEngState) -> dict[str, Any]:
         return _report(state)
