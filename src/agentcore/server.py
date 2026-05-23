@@ -142,26 +142,48 @@ async def invocations(payload, context: RequestContext):
                 #   Chunk 2: name="",     args={"agent_name": "iac-agent"}
                 # We accumulate fragments by id and defer emission until both
                 # name and agent_name are available.
-                tool_calls = dumped.get("tool_calls") or []
+                tool_calls = dumped.get("tool_calls") or dumped.get("tool_call_chunks") or []
                 for tc in tool_calls:
                     tc_id = tc.get("id", "")
                     if not tc_id:
                         continue
 
                     # Merge this fragment into the accumulator
-                    partial = partial_tool_calls.setdefault(tc_id, {"name": "", "args": {}})
+                    partial = partial_tool_calls.setdefault(tc_id, {"name": "", "args": ""})
                     incoming_name = tc.get("name", "")
                     if incoming_name:
                         partial["name"] = incoming_name
-                    incoming_args = tc.get("args") or {}
-                    partial["args"].update(incoming_args)
+
+                    incoming_args = tc.get("args")
+                    if incoming_args:
+                        if isinstance(incoming_args, str):
+                            partial["args"] += incoming_args
+                        elif isinstance(incoming_args, dict):
+                            import json
+                            try:
+                                partial["args"] = json.dumps(incoming_args)
+                            except Exception:
+                                pass
 
                     # Emit only once we have name="task" AND a non-empty agent_name
                     if partial.get("name") == "task":
-                        agent_name = (
-                            partial["args"].get("agent_name")
-                            or partial["args"].get("name", "")
-                        )
+                        agent_name = ""
+                        args_str = partial.get("args", "")
+                        if args_str:
+                            import json
+                            try:
+                                args_dict = json.loads(args_str)
+                                agent_name = args_dict.get("agent_name") or args_dict.get("name")
+                            except Exception:
+                                import re
+                                match = re.search(r'"agent_name"\s*:\s*"([^"]+)"', args_str)
+                                if match:
+                                    agent_name = match.group(1)
+                                else:
+                                    match_name = re.search(r'"name"\s*:\s*"([^"]+)"', args_str)
+                                    if match_name:
+                                        agent_name = match_name.group(1)
+
                         if agent_name and tc_id not in dispatched_agents:
                             dispatched_agents[tc_id] = agent_name
                             partial_tool_calls.pop(tc_id, None)
