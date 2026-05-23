@@ -186,7 +186,8 @@ class OrchestratorMiddleware(AgentMiddleware[OrchestratorState, Any, Any]):
         if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
             for tc in last_msg.tool_calls:
                 if tc.get("name") == "task":
-                    agent_name = tc.get("args", {}).get("agent_name", "")
+                    args = tc.get("args", {})
+                    agent_name = args.get("subagent_type") or args.get("agent_name") or ""
                     if agent_name:
                         status_updates[agent_name] = "running"
                         logger.debug("Dispatch detected: %s -> running", agent_name)
@@ -203,9 +204,8 @@ class OrchestratorMiddleware(AgentMiddleware[OrchestratorState, Any, Any]):
                     if hasattr(msg, "tool_calls"):
                         for tc in msg.tool_calls:
                             if tc.get("id") == tool_call_id:
-                                agent_name = tc.get("args", {}).get(
-                                    "agent_name", ""
-                                )
+                                args = tc.get("args", {})
+                                agent_name = args.get("subagent_type") or args.get("agent_name") or ""
                                 if agent_name:
                                     passed = "PASSED" in content.upper()
                                     status_updates[agent_name] = (

@@ -7,7 +7,13 @@ Uses BedrockAgentCoreApp with async streaming entrypoint.
 import asyncio
 import logging
 import os
+import sys
 import traceback
+
+# Guarantee project root is in sys.path for absolute imports
+_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _root not in sys.path:
+    sys.path.insert(0, _root)
 
 import boto3
 from bedrock_agentcore.runtime import BedrockAgentCoreApp, RequestContext
@@ -173,16 +179,20 @@ async def invocations(payload, context: RequestContext):
                             import json
                             try:
                                 args_dict = json.loads(args_str)
-                                agent_name = args_dict.get("agent_name") or args_dict.get("name")
+                                agent_name = args_dict.get("subagent_type") or args_dict.get("agent_name") or args_dict.get("name")
                             except Exception:
                                 import re
-                                match = re.search(r'"agent_name"\s*:\s*"([^"]+)"', args_str)
-                                if match:
-                                    agent_name = match.group(1)
+                                match_sub = re.search(r'"subagent_type"\s*:\s*"([^"]+)"', args_str)
+                                if match_sub:
+                                    agent_name = match_sub.group(1)
                                 else:
-                                    match_name = re.search(r'"name"\s*:\s*"([^"]+)"', args_str)
-                                    if match_name:
-                                        agent_name = match_name.group(1)
+                                    match = re.search(r'"agent_name"\s*:\s*"([^"]+)"', args_str)
+                                    if match:
+                                        agent_name = match.group(1)
+                                    else:
+                                        match_name = re.search(r'"name"\s*:\s*"([^"]+)"', args_str)
+                                        if match_name:
+                                            agent_name = match_name.group(1)
 
                         if agent_name and tc_id not in dispatched_agents:
                             dispatched_agents[tc_id] = agent_name
