@@ -203,7 +203,8 @@ async def invocations(payload, context: RequestContext):
                                         if match_name:
                                             agent_name = match_name.group(1)
 
-                        if agent_name and tc_id not in dispatched_agents:
+                        VALID_AGENT_NAMES = {"iac-agent", "cicd-agent", "data-eng-agent"}
+                        if agent_name in VALID_AGENT_NAMES and tc_id not in dispatched_agents:
                             dispatched_agents[tc_id] = agent_name
                             partial_tool_calls.pop(tc_id, None)
                             logger.info("Sub-agent dispatched: %s → running", agent_name)
