@@ -167,9 +167,17 @@ async def invocations(payload, context: RequestContext):
                         elif isinstance(incoming_args, dict):
                             import json
                             try:
-                                partial["args"] = json.dumps(incoming_args)
+                                # Merge dict keys into existing partial["args"] if possible
+                                existing_dict = {}
+                                if partial.get("args"):
+                                    try:
+                                        existing_dict = json.loads(partial["args"])
+                                    except Exception:
+                                        pass
+                                existing_dict.update(incoming_args)
+                                partial["args"] = json.dumps(existing_dict)
                             except Exception:
-                                pass
+                                partial["args"] = json.dumps(incoming_args)
 
                     # Emit only once we have name="task" AND a non-empty agent_name
                     if partial.get("name") == "task":
@@ -182,15 +190,16 @@ async def invocations(payload, context: RequestContext):
                                 agent_name = args_dict.get("subagent_type") or args_dict.get("agent_name") or args_dict.get("name")
                             except Exception:
                                 import re
-                                match_sub = re.search(r'"subagent_type"\s*:\s*"([^"]+)"', args_str)
+                                # Highly robust regex that matches even without trailing quote
+                                match_sub = re.search(r'"subagent_type"\s*:\s*"([a-zA-Z0-9_-]+)', args_str)
                                 if match_sub:
                                     agent_name = match_sub.group(1)
                                 else:
-                                    match = re.search(r'"agent_name"\s*:\s*"([^"]+)"', args_str)
+                                    match = re.search(r'"agent_name"\s*:\s*"([a-zA-Z0-9_-]+)', args_str)
                                     if match:
                                         agent_name = match.group(1)
                                     else:
-                                        match_name = re.search(r'"name"\s*:\s*"([^"]+)"', args_str)
+                                        match_name = re.search(r'"name"\s*:\s*"([a-zA-Z0-9_-]+)', args_str)
                                         if match_name:
                                             agent_name = match_name.group(1)
 
