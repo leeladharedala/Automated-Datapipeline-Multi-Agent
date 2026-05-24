@@ -84,7 +84,7 @@ async def invocations(payload, context: RequestContext):
 
         chunk_count = 0
         dispatched_agents: dict[str, str] = {}  # tool_call_id → agent_name
-        partial_tool_calls: dict[str, dict] = {}  # tool_call_id → accumulated fragment
+        partial_tool_calls: dict[int, dict] = {}  # tool_index → accumulated fragment
         logger.info("Starting astream for session=%s", session_id)
 
         # Use a queue + keepalive task so the stream never goes idle
@@ -146,17 +146,22 @@ async def invocations(payload, context: RequestContext):
                 # LangGraph stream_mode="messages" delivers tool calls incrementally:
                 #   Chunk 1: name="task", args={}
                 #   Chunk 2: name="",     args={"agent_name": "iac-agent"}
-                # We accumulate fragments by id and defer emission until both
+                # We accumulate fragments by index and defer emission until both
                 # name and agent_name are available.
                 tool_calls = dumped.get("tool_calls") or dumped.get("tool_call_chunks") or []
                 for tc in tool_calls:
-                    tc_id = tc.get("id", "")
-                    if not tc_id:
+                    tc_index = tc.get("index")
+                    if tc_index is None:
                         continue
 
                     # Merge this fragment into the accumulator
-                    partial = partial_tool_calls.setdefault(tc_id, {"name": "", "args": ""})
-                    incoming_name = tc.get("name", "")
+                    partial = partial_tool_calls.setdefault(tc_index, {"id": "", "name": "", "args": ""})
+                    
+                    incoming_id = tc.get("id")
+                    if incoming_id:
+                        partial["id"] = incoming_id
+
+                    incoming_name = tc.get("name")
                     if incoming_name:
                         partial["name"] = incoming_name
 
@@ -183,6 +188,7 @@ async def invocations(payload, context: RequestContext):
                     if partial.get("name") == "task":
                         agent_name = ""
                         args_str = partial.get("args", "")
+                        tc_id = partial.get("id") or f"index_{tc_index}"
                         if args_str:
                             import json
                             try:
@@ -206,7 +212,8 @@ async def invocations(payload, context: RequestContext):
                         VALID_AGENT_NAMES = {"iac-agent", "cicd-agent", "data-eng-agent"}
                         if agent_name in VALID_AGENT_NAMES and tc_id not in dispatched_agents:
                             dispatched_agents[tc_id] = agent_name
-                            partial_tool_calls.pop(tc_id, None)
+                            # Do not clear the index completely yet in case more chunks arrive,
+                            # but mark it as dispatched to prevent duplicate events.
                             logger.info("Sub-agent dispatched: %s → running", agent_name)
                             yield {
                                 "__pipeline_status__": True,
