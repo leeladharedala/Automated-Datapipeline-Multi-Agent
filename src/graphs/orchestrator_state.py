@@ -185,40 +185,54 @@ class OrchestratorMiddleware(AgentMiddleware[OrchestratorState, Any, Any]):
         # Check for tool calls dispatching to sub-agents
         if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
             for tc in last_msg.tool_calls:
-                if tc.get("name") == "task":
-                    args = tc.get("args", {})
-                    agent_name = args.get("subagent_type") or args.get("agent_name") or ""
-                    if agent_name:
-                        status_updates[agent_name] = "running"
-                        logger.debug("Dispatch detected: %s -> running", agent_name)
+                tc_name = tc.get("name", "")
+                args = tc.get("args", {})
+                agent_name = ""
+                if tc_name == "task":
+                    agent_name = args.get("subagent_type") or args.get("agent_name") or args.get("name") or ""
+                elif tc_name in ["iac-agent", "cicd-agent", "data-eng-agent"]:
+                    agent_name = tc_name
+
+                if agent_name:
+                    status_updates[agent_name] = "running"
+                    logger.debug("Dispatch detected: %s -> running", agent_name)
 
         # Check for tool messages returning sub-agent results
         if hasattr(last_msg, "type") and last_msg.type == "tool":
             name = getattr(last_msg, "name", "")
-            if name == "task":
-                content = getattr(last_msg, "content", "")
-                # Try to extract agent name from the tool call context
-                tool_call_id = getattr(last_msg, "tool_call_id", "")
-                # Look back for the matching AI message with the tool call
-                for msg in reversed(messages[:-1]):
-                    if hasattr(msg, "tool_calls"):
-                        for tc in msg.tool_calls:
-                            if tc.get("id") == tool_call_id:
-                                args = tc.get("args", {})
-                                agent_name = args.get("subagent_type") or args.get("agent_name") or ""
-                                if agent_name:
-                                    passed = "PASSED" in content.upper()
-                                    status_updates[agent_name] = (
-                                        "success" if passed else "failed"
-                                    )
-                                    # Truncate result for summary
-                                    summary = (
-                                        content[:500] + "..."
-                                        if len(content) > 500
-                                        else content
-                                    )
-                                    result_updates[agent_name] = summary
-                                break
+            tool_call_id = getattr(last_msg, "tool_call_id", "")
+            # Look back for the matching AI message with the tool call
+            for msg in reversed(messages[:-1]):
+                if hasattr(msg, "tool_calls"):
+                    for tc in msg.tool_calls:
+                        if tc.get("id") == tool_call_id:
+                            tc_name = tc.get("name", "")
+                            args = tc.get("args", {})
+                            agent_name = ""
+                            if tc_name == "task":
+                                agent_name = args.get("subagent_type") or args.get("agent_name") or args.get("name") or ""
+                            elif tc_name in ["iac-agent", "cicd-agent", "data-eng-agent"]:
+                                agent_name = tc_name
+
+                            if agent_name:
+                                content = getattr(last_msg, "content", "")
+                                content_str = str(content)
+                                passed = (
+                                    "PASSED" in content_str.upper() or
+                                    '"validation_passed": true' in content_str.lower() or
+                                    '"validation_passed":true' in content_str.lower()
+                                )
+                                status_updates[agent_name] = (
+                                    "success" if passed else "failed"
+                                )
+                                # Truncate result for summary
+                                summary = (
+                                    content_str[:500] + "..."
+                                    if len(content_str) > 500
+                                    else content_str
+                                )
+                                result_updates[agent_name] = summary
+                            break
 
         if not status_updates and not result_updates:
             return None

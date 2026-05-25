@@ -48,6 +48,7 @@ resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
     OTEL_RESOURCE_ATTRIBUTES                           = "service.name=${var.project_name}-${var.environment}"
     OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = "false"
     TRACELOOP_TRACE_CONTENT                            = "false"
+    OTEL_PYTHON_ID_GENERATOR                           = "xray"
 
     # GitHub — used by submit_pr tool to create PRs on a target repo
     GITHUB_REPO             = var.github_target_repo

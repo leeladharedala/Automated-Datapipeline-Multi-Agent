@@ -206,11 +206,13 @@ async def invocations(payload, context: RequestContext):
                             except Exception:
                                 partial["args"] = json.dumps(incoming_args)
 
-                    # Emit only once we have name="task" AND a non-empty agent_name
-                    if partial.get("name") == "task":
-                        agent_name = ""
-                        args_str = partial.get("args", "")
-                        tc_id = partial.get("id") or f"index_{tc_index}"
+                    # Emit only once we have name="task" or direct subagent name AND a non-empty agent_name
+                    tc_name = partial.get("name", "")
+                    agent_name = ""
+                    args_str = partial.get("args", "")
+                    tc_id = partial.get("id") or f"index_{tc_index}"
+
+                    if tc_name == "task":
                         if args_str:
                             import json
                             try:
@@ -230,9 +232,12 @@ async def invocations(payload, context: RequestContext):
                                         match_name = re.search(r'"name"\s*:\s*"([a-zA-Z0-9_-]+)', args_str)
                                         if match_name:
                                             agent_name = match_name.group(1)
+                    elif tc_name in {"iac-agent", "cicd-agent", "data-eng-agent"}:
+                        agent_name = tc_name
 
-                        VALID_AGENT_NAMES = {"iac-agent", "cicd-agent", "data-eng-agent"}
-                        if agent_name in VALID_AGENT_NAMES and tc_id not in dispatched_agents:
+                    VALID_AGENT_NAMES = {"iac-agent", "cicd-agent", "data-eng-agent"}
+                    if agent_name in VALID_AGENT_NAMES:
+                        if tc_id not in dispatched_agents:
                             dispatched_agents[tc_id] = agent_name
                             # Do not clear the index completely yet in case more chunks arrive,
                             # but mark it as dispatched to prevent duplicate events.
@@ -241,6 +246,9 @@ async def invocations(payload, context: RequestContext):
                                 "__pipeline_status__": True,
                                 "dispatch_statuses": {agent_name: "running"},
                             }
+                        real_id = partial.get("id")
+                        if real_id and real_id not in dispatched_agents:
+                            dispatched_agents[real_id] = agent_name
 
                 # --- Detect sub-agent completion (ToolMessage) ---
                 msg_type = dumped.get("type", "")
@@ -249,7 +257,11 @@ async def invocations(payload, context: RequestContext):
                     agent_name = dispatched_agents.get(tc_id, "")
                     if agent_name:
                         result_text = str(dumped.get("content", ""))
-                        passed = "PASSED" in result_text.upper()
+                        passed = (
+                            "PASSED" in result_text.upper() or
+                            '"validation_passed": true' in result_text.lower() or
+                            '"validation_passed":true' in result_text.lower()
+                        )
                         status = "success" if passed else "failed"
                         logger.info("Sub-agent completed: %s → %s", agent_name, status)
                         yield {
