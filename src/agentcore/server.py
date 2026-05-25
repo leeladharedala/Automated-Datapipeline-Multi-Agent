@@ -87,6 +87,25 @@ async def invocations(payload, context: RequestContext):
         partial_tool_calls: dict[int, dict] = {}  # tool_index → accumulated fragment
         logger.info("Starting astream for session=%s", session_id)
 
+        # Retrieve active OpenTelemetry trace context if available
+        from opentelemetry import trace
+        current_span = trace.get_current_span()
+        span_context = current_span.get_span_context()
+        trace_id = ""
+        if span_context.is_valid:
+            raw_id = trace.format_trace_id(span_context.trace_id)
+            if len(raw_id) == 32:
+                trace_id = f"1-{raw_id[:8]}-{raw_id[8:]}"
+            else:
+                trace_id = raw_id
+            logger.info("Active telemetry Trace ID: %s", trace_id)
+
+        if trace_id:
+            yield {
+                "__pipeline_status__": True,
+                "trace_id": trace_id
+            }
+
         # Use a queue + keepalive task so the stream never goes idle
         # (idle streams cause BodyTimeoutError on the proxy side).
         queue: asyncio.Queue = asyncio.Queue()
