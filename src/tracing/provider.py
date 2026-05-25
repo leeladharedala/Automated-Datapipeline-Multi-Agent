@@ -48,8 +48,9 @@ def setup_tracing() -> None:
 
     service_name = os.environ.get("OTEL_SERVICE_NAME", "multi-agent-data-pipeline")
     environment = os.environ.get("ENVIRONMENT", "development")
-    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
     protocol = os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
+    default_port = "4318" if protocol == "http/protobuf" else "4317"
+    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", f"http://localhost:{default_port}")
     sampler_name = os.environ.get("OTEL_TRACES_SAMPLER", "")
     sampler_arg = os.environ.get("OTEL_TRACES_SAMPLER_ARG", "1.0")
 
@@ -67,7 +68,21 @@ def setup_tracing() -> None:
     sampler = _build_sampler(sampler_name, sampler_arg)
 
     # --- TracerProvider ---
-    provider = TracerProvider(resource=resource, sampler=sampler)
+    id_generator = None
+    id_gen_env = os.environ.get("OTEL_PYTHON_ID_GENERATOR", "").lower()
+    if id_gen_env in ("xray", "aws_xray"):
+        try:
+            from opentelemetry.sdk.extension.aws.trace import AwsXRayIdGenerator
+            id_generator = AwsXRayIdGenerator()
+            logger.info("Using AwsXRayIdGenerator for X-Ray compatibility")
+        except ImportError:
+            logger.warning("AwsXRayIdGenerator requested but extension package not installed.")
+
+    provider = TracerProvider(
+        resource=resource,
+        sampler=sampler,
+        id_generator=id_generator,
+    )
 
     # --- Exporter + Processor ---
     try:
