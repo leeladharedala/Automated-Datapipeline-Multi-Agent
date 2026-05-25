@@ -113,6 +113,24 @@ async def invocations(payload, context: RequestContext):
                 await asyncio.sleep(KEEPALIVE_INTERVAL)
                 await queue.put("__keepalive__")
 
+        # Subscribe to realtime subagent logs and route them to our SSE stream queue
+        loop = asyncio.get_running_loop()
+
+        def log_listener(agent_name: str, message: str):
+            try:
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {
+                        "__pipeline_status__": True,
+                        "realtime_logs": {agent_name: message}
+                    }
+                )
+            except Exception as e:
+                logger.warning("Failed to queue log event: %s", e)
+
+        from src.graphs.realtime_logs import subscribe_realtime_logs, unsubscribe_realtime_logs
+        subscribe_realtime_logs(log_listener)
+
         producer_task = asyncio.create_task(_stream_producer())
         keepalive_task = asyncio.create_task(_keepalive())
 
@@ -125,6 +143,10 @@ async def invocations(payload, context: RequestContext):
                     raise item
                 if item == "__keepalive__":
                     yield {"__keepalive__": True}
+                    continue
+
+                if isinstance(item, dict) and "__pipeline_status__" in item:
+                    yield item
                     continue
 
                 message_chunk, metadata = item
@@ -238,6 +260,7 @@ async def invocations(payload, context: RequestContext):
 
                 yield dumped
         finally:
+            unsubscribe_realtime_logs(log_listener)
             keepalive_task.cancel()
             await producer_task
 

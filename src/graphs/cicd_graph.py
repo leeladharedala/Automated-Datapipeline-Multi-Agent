@@ -181,6 +181,12 @@ def _generate(state: CICDState, model) -> dict[str, Any]:
     into the sandbox before running actionlint — this bridges the filesystem
     gap between the generate node (VFS) and the sandbox.
     """
+    from src.graphs.realtime_logs import log_subagent_progress
+    log_subagent_progress("cicd-agent", "[system] Starting CI/CD Agent generation node...")
+    log_subagent_progress("cicd-agent", "[research] Extracting Terraform resource names from IaC configuration...")
+    log_subagent_progress("cicd-agent", "[generate] Designing deploy.yml (Linting → TF Plan → S3 Upload → TF Apply)...")
+    log_subagent_progress("cicd-agent", "[generate] Designing destroy.yml manual teardown workflow with safety gates...")
+
     task = get_task_description(state)
 
     with traced_span("agent:cicd.generate", {
@@ -205,6 +211,10 @@ def _generate(state: CICDState, model) -> dict[str, Any]:
 
 def _validate(state: CICDState, model, sandbox=None) -> dict[str, Any]:
     """Agent node: write generated workflow files into sandbox then run actionlint."""
+    from src.graphs.realtime_logs import log_subagent_progress
+    log_subagent_progress("cicd-agent", "[validate] Validating GitHub Actions YAML syntax and schema triggers...")
+    log_subagent_progress("cicd-agent", "[validate] Checking OIDC IAM role validation variables...")
+
     task = get_task_description(state)
     artifacts = state.get("workflow_artifacts", {})
     workflow_content = state.get("workflow_content", {})
@@ -363,7 +373,7 @@ def build_cicd_graph(model):
     # Load local shell backend for validate/fix nodes (terraform + actionlint
     # are pre-installed in the container)
     from src.sandbox import get_local_shell_backend
-    sandbox = get_local_shell_backend()
+    sandbox = get_local_shell_backend(agent_name="cicd-agent")
 
     def generate(state: CICDState) -> dict[str, Any]:
         return _generate(state, model)

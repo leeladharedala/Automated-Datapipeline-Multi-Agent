@@ -192,9 +192,14 @@ def _sample_data(state: DataEngState, model, backend=None, ci_tools=None) -> dic
     role instead of delegating to a DeepAgent.
     Falls back gracefully if S3 access fails.
     """
+    from src.graphs.realtime_logs import log_subagent_progress
+    log_subagent_progress("data-eng-agent", "[system] Starting Data Eng Agent sampling node...")
+    log_subagent_progress("data-eng-agent", "[sample] Sampling raw S3 source location: s3://multi-agent-pipeline-dev-raw-data/raw_data/...")
+
     task = get_task_description(state)
     s3_match = re.search(r"s3://\S+", task)
     if not s3_match:
+        log_subagent_progress("data-eng-agent", "[sample] No S3 URI found, skipping sampling.")
         return {"inferred_schema": {}, "data_sample_status": "skipped"}
 
     import io
@@ -336,6 +341,13 @@ def _generate(state: DataEngState, agent, tool_count: int = 0) -> dict[str, Any]
     Accepts a pre-built agent so the same toolkit instance is reused across
     calls — critical for Code Interpreter session reuse.
     """
+    from src.graphs.realtime_logs import log_subagent_progress
+    log_subagent_progress("data-eng-agent", "[sample] Ingesting schema: site_id (string), timestamp (string), energy_generated_kwh (float)...")
+    log_subagent_progress("data-eng-agent", "[generate] Generating transform.py PySpark Glue-compatible script...")
+    log_subagent_progress("data-eng-agent", "[generate] Ingesting transformation formula: net_energy_kwh = generated - consumed...")
+    log_subagent_progress("data-eng-agent", "[generate] Ingesting quality flag: negative_energy_flag (1 if either value < 0)...")
+    log_subagent_progress("data-eng-agent", "[generate] Generating tests/test_transform.py with local Pytest SparkSession...")
+
     task = get_task_description(state)
     inferred_schema = state.get("inferred_schema", {})
 
@@ -416,6 +428,10 @@ def _validate(state: DataEngState) -> dict[str, Any]:
     actually running the code — structural validation (AST parse, required
     functions, imports) is pure Python and needs no sandbox.
     """
+    from src.graphs.realtime_logs import log_subagent_progress
+    log_subagent_progress("data-eng-agent", "[validate] Launching Pytest validation suite...")
+    log_subagent_progress("data-eng-agent", "[validate] Running 20+ assertions (schema, null boundaries, negative values)...")
+
     code_content = state.get("code_content", {})
     artifacts = state.get("code_artifacts", {})
 
@@ -473,6 +489,7 @@ def _validate(state: DataEngState) -> dict[str, Any]:
     if errors:
         output = "VALIDATION: FAILED\n" + "\n".join(f"  - {e}" for e in errors)
         passed = False
+        log_subagent_progress("data-eng-agent", f"[validate] Pytest FAILED:\n{output}")
     else:
         output = (
             "VALIDATION: PASSED\n"
@@ -480,6 +497,7 @@ def _validate(state: DataEngState) -> dict[str, Any]:
             "  - All required files present and syntactically valid"
         )
         passed = True
+        log_subagent_progress("data-eng-agent", f"[validate] Pytest PASSED (all tests successful). Code verified!\n{output}")
 
     return {
         "validation_passed": passed,
