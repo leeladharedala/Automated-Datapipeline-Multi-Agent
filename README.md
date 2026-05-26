@@ -1,7 +1,7 @@
 # Multi-Agent Data Pipeline
 
 <p align="center">
-  <video src="assets/demo.mp4" width="100%" controls autoplay muted loop style="border-radius: 8px; box-shadow: 0 4px 30px rgba(0,0,0,0.15);"></video>
+  <video src="https://github.com/leeladharedala/Automated-Datapipeline-Multi-Agent/blob/master/assets/demo.mp4?raw=true" width="100%" controls autoplay muted loop style="border-radius: 8px; box-shadow: 0 4px 30px rgba(0,0,0,0.15);"></video>
 </p>
 
 ## 🚀 Overview
