@@ -90,8 +90,28 @@ def get_code_interpreter_tools() -> list:
         return []
 
 
+class ObservabilityLocalShellBackend(LocalShellBackend):
+    """LocalShellBackend wrapper that streams execution commands and output back to the log queue."""
+
+    def __init__(self, agent_name: str, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.agent_name = agent_name
+
+    def execute(self, command: str, *, timeout: int | None = None):
+        from src.graphs.realtime_logs import log_subagent_progress
+        # Stream the command being run
+        log_subagent_progress(self.agent_name, f"[validate] Running secure sandbox command:\n$ {command}")
+        
+        res = super().execute(command, timeout=timeout)
+        
+        # Stream the output
+        exit_code_str = f" (exit code: {res.exit_code})" if res.exit_code != 0 else ""
+        log_subagent_progress(self.agent_name, f"[validate] Command output{exit_code_str}:\n{res.output}")
+        return res
+
+
 def get_local_shell_backend(agent_name: str = "iac-agent") -> LocalShellBackend:
-    """Get or create LocalShellBackend.
+    """Get or create an observability-enabled LocalShellBackend.
 
     Used by IaC (terraform validate/fmt) and CI/CD (actionlint) nodes
     since those binaries are pre-installed in the container.
@@ -102,7 +122,7 @@ def get_local_shell_backend(agent_name: str = "iac-agent") -> LocalShellBackend:
 
     root_dir = "/tmp/agent-workspace"
     os.makedirs(root_dir, exist_ok=True)
-    backend = LocalShellBackend(root_dir=root_dir)
+    backend = ObservabilityLocalShellBackend(agent_name=agent_name, root_dir=root_dir)
     _local_shell_cache[cache_key] = backend
-    logger.info("LocalShellBackend ready for %s at %s", agent_name, root_dir)
+    logger.info("ObservabilityLocalShellBackend ready for %s at %s", agent_name, root_dir)
     return backend

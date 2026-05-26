@@ -186,6 +186,12 @@ def _research(state: IaCState, model, tools_cache: dict) -> dict[str, Any]:
     Terraform Registry and AWS Docs MCP servers on first invocation. The loaded
     tools and client are cached in tools_cache for subsequent calls.
     """
+    from src.graphs.realtime_logs import log_subagent_progress
+    log_subagent_progress("iac-agent", "[system] Starting IaC Agent research node...")
+    log_subagent_progress("iac-agent", "[research] Analyzing target S3 Bucket structure and encryption constraints...")
+    log_subagent_progress("iac-agent", "[research] Inspecting AWS Glue Job Version 4.0 requirement parameters...")
+    log_subagent_progress("iac-agent", "[research] Validating IAM Role & Policy resource access requirements...")
+
     task = get_task_description(state)
     if not task:
         return {"research_context": "No task provided."}
@@ -281,6 +287,12 @@ def _generate(state: IaCState, model, _bg_loop_cache: dict | None = None) -> dic
     task = get_task_description(state)
     research = state.get("research_context", "")
 
+    from src.graphs.realtime_logs import log_subagent_progress
+    log_subagent_progress("iac-agent", "[generate] Generating provider.tf with AWS provider version requirements...")
+    log_subagent_progress("iac-agent", "[generate] Generating variables.tf specifying configurable pipeline inputs...")
+    log_subagent_progress("iac-agent", "[generate] Compiling main.tf with S3 Bucket, IAM, and Glue Job...")
+    log_subagent_progress("iac-agent", "[generate] Writing outputs.tf to export bucket and job ARNs...")
+
     user_msg = f"## Task\n{task}\n\n## Research Context\n{research}"
     with traced_span("agent:iac.generate", {
         "agent.graph": "iac",
@@ -308,6 +320,9 @@ def _generate(state: IaCState, model, _bg_loop_cache: dict | None = None) -> dic
 
 def _validate(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None = None) -> dict[str, Any]:
     """Agent node: write generated Terraform files into sandbox then run terraform plan."""
+    from src.graphs.realtime_logs import log_subagent_progress
+    log_subagent_progress("iac-agent", "[validate] Initiating Terraform validation in secure sandbox...")
+
     task = get_task_description(state)
     research = state.get("research_context", "")
     artifacts = state.get("tf_artifacts", {})
@@ -355,6 +370,13 @@ def _validate(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None 
     else:
         # Fallback: absence of explicit FAILED with presence of PASSED
         passed = "PASSED" in upper and "FAILED" not in upper
+
+    from src.graphs.realtime_logs import log_subagent_progress
+    if passed:
+        log_subagent_progress("iac-agent", "[validate] Terraform plan PASSED. Infrastructure structure verified successfully!")
+    else:
+        log_subagent_progress("iac-agent", f"[validate] Terraform plan FAILED:\n{response}")
+
     return {
         "validation_passed": passed,
         "validation_output": response,
@@ -363,7 +385,9 @@ def _validate(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None 
 
 def _fix(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None = None) -> dict[str, Any]:
     """Agent node: fix broken Terraform files using sandbox execute + browser tools."""
+    from src.graphs.realtime_logs import log_subagent_progress
     attempt = state.get("attempt", 0) + 1
+    log_subagent_progress("iac-agent", f"[fix] Initiating self-healing loop (attempt {attempt})...")
     error_output = state.get("validation_output", "")
     task = get_task_description(state)
 

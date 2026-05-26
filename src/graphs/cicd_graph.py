@@ -181,6 +181,12 @@ def _generate(state: CICDState, model) -> dict[str, Any]:
     into the sandbox before running actionlint — this bridges the filesystem
     gap between the generate node (VFS) and the sandbox.
     """
+    from src.graphs.realtime_logs import log_subagent_progress
+    log_subagent_progress("cicd-agent", "[system] Starting CI/CD Agent generation node...")
+    log_subagent_progress("cicd-agent", "[research] Extracting Terraform resource names from IaC configuration...")
+    log_subagent_progress("cicd-agent", "[generate] Designing deploy.yml (Linting → TF Plan → S3 Upload → TF Apply)...")
+    log_subagent_progress("cicd-agent", "[generate] Designing destroy.yml manual teardown workflow with safety gates...")
+
     task = get_task_description(state)
 
     with traced_span("agent:cicd.generate", {
@@ -191,6 +197,9 @@ def _generate(state: CICDState, model) -> dict[str, Any]:
         response = _run_agent(_GENERATE_PROMPT, f"## Task\n{task}", model)
 
     workflow_content = _parse_yaml_blocks(response)
+
+    from src.graphs.realtime_logs import log_subagent_progress
+    log_subagent_progress("cicd-agent", f"[generate] Generated workflow files: {', '.join(workflow_content.keys())}")
 
     workflow_artifacts = {
         "deploy.yml": "/.github/workflows/deploy.yml",
@@ -205,6 +214,10 @@ def _generate(state: CICDState, model) -> dict[str, Any]:
 
 def _validate(state: CICDState, model, sandbox=None) -> dict[str, Any]:
     """Agent node: write generated workflow files into sandbox then run actionlint."""
+    from src.graphs.realtime_logs import log_subagent_progress
+    log_subagent_progress("cicd-agent", "[validate] Validating GitHub Actions YAML syntax and schema triggers...")
+    log_subagent_progress("cicd-agent", "[validate] Checking OIDC IAM role validation variables...")
+
     task = get_task_description(state)
     artifacts = state.get("workflow_artifacts", {})
     workflow_content = state.get("workflow_content", {})
@@ -246,6 +259,13 @@ def _validate(state: CICDState, model, sandbox=None) -> dict[str, Any]:
         passed = True
     else:
         passed = "PASSED" in upper and "FAILED" not in upper
+
+    from src.graphs.realtime_logs import log_subagent_progress
+    if passed:
+        log_subagent_progress("cicd-agent", "[validate] CI/CD Workflow Validation PASSED. Files are ready!")
+    else:
+        log_subagent_progress("cicd-agent", f"[validate] CI/CD Workflow Validation FAILED:\n{response}")
+
     return {
         "validation_passed": passed,
         "validation_output": response,
@@ -254,7 +274,9 @@ def _validate(state: CICDState, model, sandbox=None) -> dict[str, Any]:
 
 def _fix(state: CICDState, model, sandbox=None) -> dict[str, Any]:
     """Agent node: fix actionlint errors and update workflow_content in state."""
+    from src.graphs.realtime_logs import log_subagent_progress
     attempt = state.get("attempt", 0) + 1
+    log_subagent_progress("cicd-agent", f"[fix] Initiating self-healing loop (attempt {attempt})...")
     error_output = state.get("validation_output", "")
     task = get_task_description(state)
 
