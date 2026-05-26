@@ -1,7 +1,7 @@
 # Multi-Agent Data Pipeline
 
 <p align="center">
-  <a href="https://github.com/leeladharedala/Automated-Datapipeline-Multi-Agent/blob/master/assets/demo.mp4">
+  <a href="https://github.com/leeladharedala/Automated-Datapipeline-Multi-Agent/raw/master/assets/demo.mp4">
     <img src="assets/video_thumbnail.png" alt="Watch Demo Video" width="100%" style="border-radius: 8px; box-shadow: 0 4px 30px rgba(0,0,0,0.25);" />
   </a>
 </p>
