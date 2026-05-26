@@ -1,5 +1,9 @@
 # Multi-Agent Data Pipeline
 
+<p align="center">
+  <video src="assets/demo.mp4" width="100%" controls autoplay muted loop style="border-radius: 8px; box-shadow: 0 4px 30px rgba(0,0,0,0.15);"></video>
+</p>
+
 ## 🚀 Overview
 This multi-agent system is designed to autonomously generate, validate, and deploy production-grade cloud infrastructure (Terraform), CI/CD pipelines (GitHub Actions), and data engineering workloads (PySpark). 
 
