@@ -45,7 +45,6 @@ async def build_agent():
 
     model = ChatAnthropic(
         model="claude-sonnet-5",
-        temperature=0,
     )
 
     # Async sub-agent specs. A spec containing `graph_id` triggers deepagents to

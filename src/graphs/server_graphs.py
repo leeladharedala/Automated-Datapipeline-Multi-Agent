@@ -23,10 +23,9 @@ from src.graphs import (
 
 # Env-driven model defaults, consistent with src/main.py's Supervisor build.
 _MODEL_NAME = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
-_MODEL_TEMPERATURE = float(os.environ.get("ANTHROPIC_TEMPERATURE", "0"))
 
 # One shared model for every sub-agent graph on the co-located server.
-_model = ChatAnthropic(model=_MODEL_NAME, temperature=_MODEL_TEMPERATURE)
+_model = ChatAnthropic(model=_MODEL_NAME)
 
 # Module-level compiled graph handles referenced by langgraph.json.
 # graph_id values ("iac" / "cicd" / "data-eng") match the AsyncSubAgent specs.
