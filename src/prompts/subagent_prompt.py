@@ -93,7 +93,7 @@ iac_subagent = {
         "Delegate infrastructure provisioning tasks to this agent."
     ),
     "system_prompt": IAC_SYSTEM_PROMPT,
-    "model": "anthropic:claude-sonnet-4-6-20250514",
+    "model": "anthropic:claude-sonnet-5",
 }
 
 
@@ -184,7 +184,7 @@ cicd_subagent = {
         "Delegate CI/CD pipeline tasks to this agent."
     ),
     "system_prompt": CICD_SYSTEM_PROMPT,
-    "model": "anthropic:claude-sonnet-4-6-20250514",
+    "model": "anthropic:claude-sonnet-5",
 }
 
 

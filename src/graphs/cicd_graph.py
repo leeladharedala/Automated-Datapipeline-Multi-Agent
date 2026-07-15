@@ -156,9 +156,13 @@ def _parse_yaml_blocks(response: str) -> dict[str, str]:
     import re as _re
     content: dict[str, str] = {}
 
-    # Try named blocks first: ```yaml:filename.yml
-    named = _re.findall(r"```(?:yaml:)([\w./]+\.yml)\n(.*?)```", response, _re.DOTALL)
+    # Try named blocks first: ```yaml:filename.yml (or .yaml). Keys are
+    # normalized to the .yml spelling the rest of the pipeline expects
+    # (artifact paths, sandbox writes, PR file paths).
+    named = _re.findall(r"```(?:yaml:)([\w./]+\.ya?ml)\n(.*?)```", response, _re.DOTALL)
     for fname, code in named:
+        if fname.endswith(".yaml"):
+            fname = fname[: -len(".yaml")] + ".yml"
         content[fname] = code.strip()
 
     if "deploy.yml" in content:
@@ -181,11 +185,11 @@ def _generate(state: CICDState, model) -> dict[str, Any]:
     into the sandbox before running actionlint — this bridges the filesystem
     gap between the generate node (VFS) and the sandbox.
     """
-    from src.graphs.realtime_logs import log_subagent_progress
-    log_subagent_progress("cicd-agent", "[system] Starting CI/CD Agent generation node...")
-    log_subagent_progress("cicd-agent", "[research] Extracting Terraform resource names from IaC configuration...")
-    log_subagent_progress("cicd-agent", "[generate] Designing deploy.yml (Linting → TF Plan → S3 Upload → TF Apply)...")
-    log_subagent_progress("cicd-agent", "[generate] Designing destroy.yml manual teardown workflow with safety gates...")
+    from src.graphs.progress import emit_progress
+    emit_progress(
+        "cicd-agent",
+        "[generate] Generating GitHub Actions workflows (deploy.yml, destroy.yml)...",
+    )
 
     task = get_task_description(state)
 
@@ -198,8 +202,11 @@ def _generate(state: CICDState, model) -> dict[str, Any]:
 
     workflow_content = _parse_yaml_blocks(response)
 
-    from src.graphs.realtime_logs import log_subagent_progress
-    log_subagent_progress("cicd-agent", f"[generate] Generated workflow files: {', '.join(workflow_content.keys())}")
+    emit_progress(
+        "cicd-agent",
+        f"[generate] Generated {len(workflow_content)} workflow file(s): "
+        f"{', '.join(workflow_content) or 'none'}",
+    )
 
     workflow_artifacts = {
         "deploy.yml": "/.github/workflows/deploy.yml",
@@ -214,23 +221,26 @@ def _generate(state: CICDState, model) -> dict[str, Any]:
 
 def _validate(state: CICDState, model, sandbox=None) -> dict[str, Any]:
     """Agent node: write generated workflow files into sandbox then run actionlint."""
-    from src.graphs.realtime_logs import log_subagent_progress
-    log_subagent_progress("cicd-agent", "[validate] Validating GitHub Actions YAML syntax and schema triggers...")
-    log_subagent_progress("cicd-agent", "[validate] Checking OIDC IAM role validation variables...")
+    from src.graphs.progress import emit_progress
+    emit_progress("cicd-agent", "[validate] Running actionlint on the generated workflow files...")
 
     task = get_task_description(state)
     artifacts = state.get("workflow_artifacts", {})
     workflow_content = state.get("workflow_content", {})
 
     # Build shell commands that write the generated files into the sandbox.
-    # Use python3 -c to write files — avoids all shell quoting issues with YAML content.
-    deploy_content = workflow_content.get("deploy.yml", "")
-    destroy_content = workflow_content.get("destroy.yml", "")
-    write_cmds = (
-        "mkdir -p /.github/workflows"
-        f" && python3 -c \"open('/.github/workflows/deploy.yml', 'w').write({repr(deploy_content)})\""
-        f" && python3 -c \"open('/.github/workflows/destroy.yml', 'w').write({repr(destroy_content)})\""
-    )
+    # Workflow YAML is full of double quotes and ${{ ... }} expressions, both
+    # of which the shell mangles inside a double-quoted command. Base64 is
+    # pure [A-Za-z0-9+/=], so the payload survives the shell untouched.
+    import base64
+    write_cmds = "mkdir -p /.github/workflows"
+    for fname in ["deploy.yml", "destroy.yml"]:
+        b64 = base64.b64encode(workflow_content.get(fname, "").encode()).decode()
+        write_cmds += (
+            f" && python3 -c 'import base64;"
+            f' open("/.github/workflows/{fname}", "wb")'
+            f'.write(base64.b64decode("{b64}"))\''
+        )
 
     files_list = ", ".join(artifacts.values()) if artifacts else "unknown"
 
@@ -260,11 +270,10 @@ def _validate(state: CICDState, model, sandbox=None) -> dict[str, Any]:
     else:
         passed = "PASSED" in upper and "FAILED" not in upper
 
-    from src.graphs.realtime_logs import log_subagent_progress
     if passed:
-        log_subagent_progress("cicd-agent", "[validate] CI/CD Workflow Validation PASSED. Files are ready!")
+        emit_progress("cicd-agent", "[validate] actionlint validation PASSED.")
     else:
-        log_subagent_progress("cicd-agent", f"[validate] CI/CD Workflow Validation FAILED:\n{response}")
+        emit_progress("cicd-agent", f"[validate] actionlint validation FAILED:\n{response}")
 
     return {
         "validation_passed": passed,
@@ -274,9 +283,9 @@ def _validate(state: CICDState, model, sandbox=None) -> dict[str, Any]:
 
 def _fix(state: CICDState, model, sandbox=None) -> dict[str, Any]:
     """Agent node: fix actionlint errors and update workflow_content in state."""
-    from src.graphs.realtime_logs import log_subagent_progress
+    from src.graphs.progress import emit_progress
     attempt = state.get("attempt", 0) + 1
-    log_subagent_progress("cicd-agent", f"[fix] Initiating self-healing loop (attempt {attempt})...")
+    emit_progress("cicd-agent", f"[fix] Initiating self-healing loop (attempt {attempt})...")
     error_output = state.get("validation_output", "")
     task = get_task_description(state)
 

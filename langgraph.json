@@ -1,0 +1,11 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "iac": "./src/graphs/server_graphs.py:iac_graph",
+    "cicd": "./src/graphs/server_graphs.py:cicd_graph",
+    "data-eng": "./src/graphs/server_graphs.py:data_eng_graph",
+    "supervisor": "./src/graphs/server_graphs.py:supervisor_graph"
+  },
+  "env": ".env",
+  "python_version": "3.12"
+}

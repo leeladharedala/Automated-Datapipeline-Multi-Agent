@@ -38,6 +38,9 @@ resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
     # Model
     BEDROCK_MODEL_ID = var.agentcore_model_id
 
+    # Co-located subagent server (Process B) — localhost-only, no external ports
+    SUBAGENT_SERVER_URL = "http://127.0.0.1:2024"
+
 
     # Observability (ADOT)
     AGENT_OBSERVABILITY_ENABLED                        = "true"
@@ -49,7 +52,6 @@ resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
     OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = "false"
     TRACELOOP_TRACE_CONTENT                            = "false"
     OTEL_PYTHON_ID_GENERATOR                           = "xray"
-    OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED   = "false"
 
     # GitHub — used by submit_pr tool to create PRs on a target repo
     GITHUB_REPO             = var.github_target_repo

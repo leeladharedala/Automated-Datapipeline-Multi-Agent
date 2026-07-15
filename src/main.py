@@ -3,28 +3,37 @@ Multi-Agent Data Pipeline — Entry Point
 
 Creates the root orchestrator agent using DeepAgents, backed by
 AgentCore Memory for short-term checkpoint persistence.
+
+Sub-agents are launched as non-blocking background runs on a co-located
+LangGraph API server via deepagents' AsyncSubAgent (preview API, 0.6.x).
+The three sub-agent graphs live only in the co-located server process
+(see src/graphs/server_graphs.py + langgraph.json); this process no longer
+instantiates them.
 """
 
 import logging
 import os
 
-from deepagents import create_deep_agent, CompiledSubAgent
+from deepagents import create_deep_agent
+from deepagents.middleware.async_subagents import AsyncSubAgent  # preview API (0.6.x)
 from langchain_anthropic import ChatAnthropic
 from langgraph_checkpoint_aws import AgentCoreMemorySaver
 
 from src.prompts.orchestrator_prompt import ORCHESTRATOR_PROMPT
-from src.graphs import (
-    build_iac_graph,
-    build_cicd_graph,
-    build_data_eng_graph,
-    OrchestratorMiddleware,
-)
-from src.tools.gateway import load_gateway_tools
+from src.graphs import OrchestratorMiddleware
 from src.tools.submit_pr import submit_pr
 from src.document_parser import parse_document_tool
 
 REGION = os.environ.get("AWS_REGION", "us-west-2")
 MEMORY_ID = os.environ.get("AGENTCORE_MEMORY_ID", "")
+
+# Co-located LangGraph API server on localhost inside the same container.
+SUBAGENT_SERVER_URL = os.environ.get("SUBAGENT_SERVER_URL", "http://127.0.0.1:2024")
+
+# The middleware injects `x-auth-scheme: langsmith` by default. Our co-located
+# server is self-hosted, so override the header per spec to a scheme the server
+# ignores/accepts (see Requirement 14).
+_LOCAL_HEADERS = {"x-auth-scheme": "noop"}
 
 logger = logging.getLogger(__name__)
 
@@ -35,53 +44,53 @@ async def build_agent():
         raise RuntimeError("AGENTCORE_MEMORY_ID environment variable is required")
 
     model = ChatAnthropic(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         temperature=0,
     )
 
-    # MCP tools (Terraform Registry + AWS Docs) are loaded lazily on first
-    # IaC research node invocation to avoid AgentCore's 120s init timeout.
-    # The npx/uvx downloads happen at research time, not at startup.
-    gateway_tools = []
-
-    # Build compiled sub-agent graphs
-    iac_graph = build_iac_graph(model=model, tools=gateway_tools)
-    cicd_graph = build_cicd_graph(model=model)
-    data_eng_graph = build_data_eng_graph(model=model, tools=[])
-
-    # Wrap as CompiledSubAgent objects (not plain dicts)
-    subagents = [
-        CompiledSubAgent(
+    # Async sub-agent specs. A spec containing `graph_id` triggers deepagents to
+    # auto-append AsyncSubAgentMiddleware, so we do NOT instantiate it ourselves.
+    # `graph_id` must match the keys registered in langgraph.json for the
+    # co-located server; `url` targets that localhost server.
+    async_subagents: list[AsyncSubAgent] = [
+        AsyncSubAgent(
             name="iac-agent",
             description="Generates Terraform infrastructure code for AWS resources.",
-            runnable=iac_graph,
+            graph_id="iac",  # must match langgraph.json key
+            url=SUBAGENT_SERVER_URL,
+            headers=_LOCAL_HEADERS,
         ),
-        CompiledSubAgent(
+        AsyncSubAgent(
             name="cicd-agent",
             description="Generates GitHub Actions CI/CD workflows.",
-            runnable=cicd_graph,
+            graph_id="cicd",
+            url=SUBAGENT_SERVER_URL,
+            headers=_LOCAL_HEADERS,
         ),
-        CompiledSubAgent(
+        AsyncSubAgent(
             name="data-eng-agent",
             description="Generates data transformation code with tests.",
-            runnable=data_eng_graph,
+            graph_id="data-eng",
+            url=SUBAGENT_SERVER_URL,
+            headers=_LOCAL_HEADERS,
         ),
     ]
 
     # Short-term memory: use the remote saver directly for the orchestrator so
-    # every turn is persisted immediately.  The ThrottledCheckpointSaver is
-    # intentionally NOT used here — throttling caused the final checkpoint of
-    # a pipeline run to be skipped, leaving the next turn with no conversation
-    # history and causing the LLM to re-dispatch all subagents from scratch.
-    # Subagents run to completion in a single shot and don't need a checkpointer.
+    # every turn is persisted immediately.  Do NOT throttle checkpoint writes
+    # here — a throttled saver previously skipped the final checkpoint of a
+    # pipeline run, leaving the next turn with no conversation history and
+    # causing the LLM to re-dispatch all subagents from scratch.
+    # Subagent persistence is owned by the co-located server, not this process.
     checkpointer = AgentCoreMemorySaver(memory_id=MEMORY_ID, region_name=REGION)
 
     # Pass tools directly — skip tracing wrappers to avoid
-    # Pydantic v2 compatibility issues during agent compilation
+    # Pydantic v2 compatibility issues during agent compilation.
+    # `graph_id` presence in the specs auto-adds AsyncSubAgentMiddleware.
     agent = create_deep_agent(
         model=model,
         system_prompt=ORCHESTRATOR_PROMPT,
-        subagents=subagents,
+        subagents=async_subagents,
         tools=[submit_pr, parse_document_tool],
         checkpointer=checkpointer,
         middleware=[OrchestratorMiddleware()],

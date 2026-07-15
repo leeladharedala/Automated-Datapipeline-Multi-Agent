@@ -171,19 +171,7 @@ def _build_agent(model, tools: list, system_prompt: str):
     )
 
 
-_SAMPLE_DATA_PROMPT = """\
-You are a data sampling specialist. You have access to the execute tool \
-which runs commands in the AgentCore Runtime sandbox.
-
-Given the S3 URI and format below, sample up to {sample_size} records and \
-infer the schema. Run a PySpark script using the execute tool.
-
-IMPORTANT: Respond with ONLY the JSON output from the script, nothing else. \
-Do not add any commentary before or after the JSON.
-"""
-
-
-def _sample_data(state: DataEngState, model, backend=None, ci_tools=None) -> dict[str, Any]:
+def _sample_data(state: DataEngState) -> dict[str, Any]:
     """Sample data schema directly from S3 using boto3 + pandas in-process.
 
     Runs in the container where IAM role credentials are available.
@@ -192,19 +180,14 @@ def _sample_data(state: DataEngState, model, backend=None, ci_tools=None) -> dic
     role instead of delegating to a DeepAgent.
     Falls back gracefully if S3 access fails.
     """
-    from src.graphs.realtime_logs import log_subagent_progress
-    log_subagent_progress("data-eng-agent", "[system] Starting Data Eng Agent sampling node...")
-    log_subagent_progress("data-eng-agent", "[sample] Sampling raw S3 source location: s3://multi-agent-pipeline-dev-raw-data/raw_data/...")
+    from src.graphs.progress import emit_progress
 
     task = get_task_description(state)
     s3_match = re.search(r"s3://\S+", task)
     if not s3_match:
-        log_subagent_progress("data-eng-agent", "[sample] No S3 URI found, skipping sampling.")
+        emit_progress("data-eng-agent", "[sample] No S3 URI found in the task; skipping data sampling.")
         logger.info("No S3 URI found, skipping sampling.")
         return {"inferred_schema": {}, "data_sample_status": "skipped"}
-
-    import io
-    import os
 
     import boto3
     import pandas as pd
@@ -217,6 +200,7 @@ def _sample_data(state: DataEngState, model, backend=None, ci_tools=None) -> dic
     key = parts[1] if len(parts) > 1 else ""
 
     if not key:
+        emit_progress("data-eng-agent", f"[sample] S3 URI {s3_uri} has no object key; skipping data sampling.")
         logger.warning("S3 URI %s has no object key, skipping sampling", s3_uri)
         return {"inferred_schema": {}, "data_sample_status": "skipped"}
 
@@ -228,6 +212,12 @@ def _sample_data(state: DataEngState, model, backend=None, ci_tools=None) -> dic
         fmt = "json"
     else:
         fmt = "parquet"
+
+    emit_progress(
+        "data-eng-agent",
+        f"[sample] Sampling up to {DEFAULT_SAMPLE_SIZE} rows from {s3_uri} "
+        f"(format: {fmt})...",
+    )
 
     try:
         with traced_span("agent:data_eng.sample_data", {
@@ -255,6 +245,10 @@ def _sample_data(state: DataEngState, model, backend=None, ci_tools=None) -> dic
                     and (not target_ext or obj_meta["Key"].endswith(target_ext))
                 ]
                 if not candidates:
+                    emit_progress(
+                        "data-eng-agent",
+                        f"[sample] No sampleable files found under s3://{bucket}/{key}; skipping.",
+                    )
                     logger.warning(
                         "No sampleable files found under s3://%s/%s, skipping",
                         bucket, key,
@@ -281,6 +275,11 @@ def _sample_data(state: DataEngState, model, backend=None, ci_tools=None) -> dic
                     "nullable": bool(df[col].isnull().any()),
                 })
 
+            emit_progress(
+                "data-eng-agent",
+                f"[sample] Inferred schema: {len(schema)} column(s) from "
+                f"{len(df)} sampled row(s).",
+            )
             return {
                 "inferred_schema": {
                     "columns": schema,
@@ -289,6 +288,7 @@ def _sample_data(state: DataEngState, model, backend=None, ci_tools=None) -> dic
                 "data_sample_status": "success",
             }
     except Exception as exc:
+        emit_progress("data-eng-agent", f"[sample] Data sampling failed: {exc}")
         logger.error("Data sampling failed: %s", exc)
         return {"inferred_schema": {}, "data_sample_status": "failed"}
 
@@ -342,15 +342,23 @@ def _generate(state: DataEngState, agent, tool_count: int = 0) -> dict[str, Any]
     Accepts a pre-built agent so the same toolkit instance is reused across
     calls — critical for Code Interpreter session reuse.
     """
-    from src.graphs.realtime_logs import log_subagent_progress
-    log_subagent_progress("data-eng-agent", "[sample] Ingesting schema: site_id (string), timestamp (string), energy_generated_kwh (float)...")
-    log_subagent_progress("data-eng-agent", "[generate] Generating transform.py PySpark Glue-compatible script...")
-    log_subagent_progress("data-eng-agent", "[generate] Ingesting transformation formula: net_energy_kwh = generated - consumed...")
-    log_subagent_progress("data-eng-agent", "[generate] Ingesting quality flag: negative_energy_flag (1 if either value < 0)...")
-    log_subagent_progress("data-eng-agent", "[generate] Generating tests/test_transform.py with local Pytest SparkSession...")
+    from src.graphs.progress import emit_progress
 
     task = get_task_description(state)
     inferred_schema = state.get("inferred_schema", {})
+
+    if inferred_schema and inferred_schema.get("columns"):
+        emit_progress(
+            "data-eng-agent",
+            f"[generate] Generating PySpark transformation code using the "
+            f"inferred schema ({len(inferred_schema['columns'])} columns)...",
+        )
+    else:
+        emit_progress(
+            "data-eng-agent",
+            "[generate] Generating PySpark transformation code from the task "
+            "description (no data sample available)...",
+        )
 
     user_msg = f"## Task\n{task}"
 
@@ -383,6 +391,11 @@ def _generate(state: DataEngState, agent, tool_count: int = 0) -> dict[str, Any]
         response = _invoke_agent(agent, user_msg)
 
     code_content = _parse_code_blocks(response)
+    emit_progress(
+        "data-eng-agent",
+        f"[generate] Generated {len(code_content)} file(s): "
+        f"{', '.join(code_content) or 'none'}",
+    )
     if not code_content.get("transform.py"):
         logger.warning(
             "generate: _parse_code_blocks found no transform.py in response "
@@ -429,9 +442,12 @@ def _validate(state: DataEngState) -> dict[str, Any]:
     actually running the code — structural validation (AST parse, required
     functions, imports) is pure Python and needs no sandbox.
     """
-    from src.graphs.realtime_logs import log_subagent_progress
-    log_subagent_progress("data-eng-agent", "[validate] Launching Pytest validation suite...")
-    log_subagent_progress("data-eng-agent", "[validate] Running 20+ assertions (schema, null boundaries, negative values)...")
+    from src.graphs.progress import emit_progress
+    emit_progress(
+        "data-eng-agent",
+        "[validate] Running structural checks on the generated code "
+        "(syntax, main() entry point, PySpark imports)...",
+    )
 
     code_content = state.get("code_content", {})
     artifacts = state.get("code_artifacts", {})
@@ -490,7 +506,6 @@ def _validate(state: DataEngState) -> dict[str, Any]:
     if errors:
         output = "VALIDATION: FAILED\n" + "\n".join(f"  - {e}" for e in errors)
         passed = False
-        log_subagent_progress("data-eng-agent", f"[validate] Pytest FAILED:\n{output}")
     else:
         output = (
             "VALIDATION: PASSED\n"
@@ -498,7 +513,7 @@ def _validate(state: DataEngState) -> dict[str, Any]:
             "  - All required files present and syntactically valid"
         )
         passed = True
-        log_subagent_progress("data-eng-agent", f"[validate] Pytest PASSED (all tests successful). Code verified!\n{output}")
+    emit_progress("data-eng-agent", f"[validate] Structural validation result:\n{output}")
 
     return {
         "validation_passed": passed,
@@ -532,15 +547,6 @@ Common issues: missing main() entry point, syntax errors, missing pyspark import
 """
 
 
-def _is_session_inactive_error(exc: Exception) -> bool:
-    """Return True if the exception is a Code Interpreter session-not-active error."""
-    msg = str(exc)
-    return (
-        "ValidationException" in msg
-        and "not active" in msg
-    ) or "Code interpreter session" in msg
-
-
 def _fix(state: DataEngState, model) -> dict[str, Any]:
     """Fix validation failures using a single stateless LLM call.
 
@@ -555,9 +561,9 @@ def _fix(state: DataEngState, model) -> dict[str, Any]:
     from src.sandbox import _code_interpreter_cache
     from langchain_core.messages import SystemMessage
 
-    from src.graphs.realtime_logs import log_subagent_progress
+    from src.graphs.progress import emit_progress
     attempt = state.get("attempt", 0) + 1
-    log_subagent_progress("data-eng-agent", f"[fix] Initiating self-healing loop (attempt {attempt})...")
+    emit_progress("data-eng-agent", f"[fix] Initiating self-healing loop (attempt {attempt})...")
     error_output = state.get("validation_output", "")
     task = get_task_description(state)
     inferred_schema = state.get("inferred_schema", {})
@@ -650,7 +656,7 @@ def _report(state: DataEngState) -> dict[str, Any]:
             file_contents += f"\n\n### {fname}\n```python\n{content}\n```"
 
     if passed:
-        status_line = "VALIDATION: PASSED\npytest completed successfully."
+        status_line = "VALIDATION: PASSED\nStructural validation completed successfully."
     else:
         status_line = f"VALIDATION: FAILED ({attempt}/{max_attempts} attempts exhausted)\n\nLAST ERROR:\n{validation_output}"
 
@@ -710,7 +716,7 @@ def build_data_eng_graph(model, tools=None):
     graph = StateGraph(DataEngState)
 
     def sample_data(state: DataEngState) -> dict[str, Any]:
-        return _sample_data(state, model)
+        return _sample_data(state)
 
     def generate(state: DataEngState) -> dict[str, Any]:
         return _generate(state, generate_agent, tool_count=len(browser_tools))

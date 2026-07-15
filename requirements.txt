@@ -1,18 +1,30 @@
 # Core agent framework
-deepagents==0.5.6
-langgraph>=1.0.10
+# deepagents async sub-agents are a PREVIEW API in the 0.6.x line (interface may change).
+# 0.6.x adds the stream_events(version="v3") primitive + native reconnect/replay remote streaming.
+# NOTE: 0.5.x -> 0.6.x is a breaking-surface upgrade; validate build() + memory integration (Req 16.4).
+deepagents==0.6.8
+langgraph>=1.2.8
 langgraph-prebuilt>=1.0.8
-langchain>=1.2.15
-langchain-anthropic>=1.3.4
+langgraph-checkpoint>=3.0.1        # required by langgraph-api / langgraph-checkpoint-aws 1.x
+langchain>=1.3.4                   # deepagents 0.6.8 requires >=1.3.4
+langchain-core>=1.4.0              # deepagents 0.6.8 requires >=1.4.0
+langchain-anthropic>=1.4.3         # deepagents 0.6.8 requires >=1.4.3
+langchain-google-genai>=4.2.2      # newly mandatory transitive dep of deepagents 0.6.x
 langchain-openai>=1.1.0
 langchain-mcp-adapters>=0.2.0
 nest_asyncio>=1.6.0
 
 # CopilotKit AG-UI integration
-copilotkit>=0.1.88
+copilotkit>=0.1.94
 
 # AgentCore Memory (checkpointer + store for LangGraph)
-langgraph-checkpoint-aws>=0.1.0
+# Bumped to 1.x so langgraph-checkpoint>=3.0.1 (required by langgraph-api) resolves.
+langgraph-checkpoint-aws>=1.2.0
+
+# Co-located LangGraph Agent Protocol server + client SDK (async sub-agents)
+langgraph-api>=0.10.1
+langgraph-cli>=0.4.30
+langgraph-sdk>=0.4.2
 
 # AWS SDK
 boto3>=1.42.0
@@ -22,7 +34,7 @@ bedrock-agentcore>=1.0.0
 
 langchain-aws>=1.0.0
 
-# Web ser
+# Web server
 fastapi>=0.115.0
 uvicorn>=0.34.0
 

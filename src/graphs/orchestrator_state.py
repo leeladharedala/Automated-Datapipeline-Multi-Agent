@@ -21,13 +21,27 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
-from langchain_core.messages import SystemMessage
 from typing_extensions import NotRequired
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 from deepagents.middleware._utils import append_to_system_message
+
+# The deepagents ``AsyncSubAgentMiddleware`` tracks background sub-agent runs in
+# the ``async_tasks`` state channel (keyed by ``task_id``, each entry carrying
+# ``agent_name``/``thread_id``/``run_id``/``status`` — see AsyncTask). This
+# middleware reconciles that channel into the Orchestrator_State dashboard view
+# (``dispatch_statuses`` / ``accumulated_results``, keyed by ``agent_name``) so
+# the reconciled view persists in Supervisor memory across turns/compaction.
+# The reconciliation helpers are shared with the AgentCore ingress
+# (src/agentcore/server.py) via src/graphs/_reconcile.py.
+from src.graphs._reconcile import (
+    LAUNCH_TOOL_NAME,
+    extract_result_summaries,
+    launch_agent_name,
+    reconcile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -163,85 +177,62 @@ class OrchestratorMiddleware(AgentMiddleware[OrchestratorState, Any, Any]):
         modified = self.modify_request(request)
         return await handler(modified)
 
-    # --- after_model: update dispatch statuses from tool calls ---
+    # --- after_model: reconcile async task state from tool calls/results ---
 
     def _extract_dispatch_updates(
         self, state: OrchestratorState
     ) -> dict[str, Any] | None:
-        """Parse the latest AI message for sub-agent dispatch/completion signals.
+        """Reconcile async sub-agent task state into Orchestrator_State.
 
-        Looks for tool calls named 'task' (DeepAgent's sub-agent dispatch tool)
-        and updates dispatch_statuses accordingly. When a sub-agent result appears
-        in messages, updates accumulated_results.
+        Recognizes the deepagents async task tool surface:
+
+        - ``start_async_task`` tool CALL (in the AI message the model just
+          produced) -> the Sub_Agent is launched, so its ``agent_name`` (from
+          ``subagent_type``) is marked ``running`` immediately. This fires before
+          the launch tool writes the ``async_tasks`` channel, so freshly launched
+          agents surface without waiting a turn.
+        - ``check_async_task`` / ``list_async_tasks`` / ``cancel_async_task`` /
+          ``update_async_task`` results land in the ``async_tasks`` channel (a
+          per-``task_id`` status). Reconciling that channel derives terminal
+          ``success``/``failed``/``cancelled`` statuses via the same derivation
+          table as the server. On success, a truncated result summary (recovered
+          from the ``check_async_task`` JSON ToolMessage, matched by
+          ``task_id``) is recorded under the resolved ``agent_name``.
+
+        Writing these into ``dispatch_statuses`` / ``accumulated_results`` (both
+        merge_dicts-reduced) persists the reconciled view in Supervisor memory
+        across turns and context compaction.
         """
         messages = state.get("messages", [])
-        if not messages:
-            return None
+        async_tasks = state.get("async_tasks") or {}
 
-        last_msg = messages[-1]
-        status_updates: dict[str, str] = {}
-        result_updates: dict[str, str] = {}
+        # Reconcile the persisted async_tasks channel (authoritative statuses
+        # written by the check/cancel/list/update tools) into per-agent state.
+        summaries = extract_result_summaries(messages)
+        dispatch_statuses, accumulated_results = reconcile(async_tasks, summaries)
 
-        # Check for tool calls dispatching to sub-agents
-        if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-            for tc in last_msg.tool_calls:
-                tc_name = tc.get("name", "")
-                args = tc.get("args", {})
-                agent_name = ""
-                if tc_name == "task":
-                    agent_name = args.get("subagent_type") or args.get("agent_name") or args.get("name") or ""
-                elif tc_name in ["iac-agent", "cicd-agent", "data-eng-agent"]:
-                    agent_name = tc_name
+        # Mark freshly launched agents running from start_async_task calls in the
+        # AI message the model just produced. The channel is authoritative, so a
+        # launch only fills a gap for an agent not already resolved from it.
+        if messages:
+            last_msg = messages[-1]
+            tool_calls = getattr(last_msg, "tool_calls", None) or []
+            for tc in tool_calls:
+                if tc.get("name") != LAUNCH_TOOL_NAME:
+                    continue
+                agent_name = launch_agent_name(tc.get("args"))
+                if agent_name and agent_name not in dispatch_statuses:
+                    dispatch_statuses[agent_name] = "running"
+                    logger.debug("Async launch detected: %s -> running", agent_name)
 
-                if agent_name:
-                    status_updates[agent_name] = "running"
-                    logger.debug("Dispatch detected: %s -> running", agent_name)
-
-        # Check for tool messages returning sub-agent results
-        if hasattr(last_msg, "type") and last_msg.type == "tool":
-            name = getattr(last_msg, "name", "")
-            tool_call_id = getattr(last_msg, "tool_call_id", "")
-            # Look back for the matching AI message with the tool call
-            for msg in reversed(messages[:-1]):
-                if hasattr(msg, "tool_calls"):
-                    for tc in msg.tool_calls:
-                        if tc.get("id") == tool_call_id:
-                            tc_name = tc.get("name", "")
-                            args = tc.get("args", {})
-                            agent_name = ""
-                            if tc_name == "task":
-                                agent_name = args.get("subagent_type") or args.get("agent_name") or args.get("name") or ""
-                            elif tc_name in ["iac-agent", "cicd-agent", "data-eng-agent"]:
-                                agent_name = tc_name
-
-                            if agent_name:
-                                content = getattr(last_msg, "content", "")
-                                content_str = str(content)
-                                passed = (
-                                    "PASSED" in content_str.upper() or
-                                    '"validation_passed": true' in content_str.lower() or
-                                    '"validation_passed":true' in content_str.lower()
-                                )
-                                status_updates[agent_name] = (
-                                    "success" if passed else "failed"
-                                )
-                                # Truncate result for summary
-                                summary = (
-                                    content_str[:500] + "..."
-                                    if len(content_str) > 500
-                                    else content_str
-                                )
-                                result_updates[agent_name] = summary
-                            break
-
-        if not status_updates and not result_updates:
+        if not dispatch_statuses and not accumulated_results:
             return None
 
         updates: dict[str, Any] = {}
-        if status_updates:
-            updates["dispatch_statuses"] = status_updates
-        if result_updates:
-            updates["accumulated_results"] = result_updates
+        if dispatch_statuses:
+            updates["dispatch_statuses"] = dispatch_statuses
+        if accumulated_results:
+            updates["accumulated_results"] = accumulated_results
         return updates
 
     def after_model(

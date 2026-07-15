@@ -57,7 +57,7 @@ architecture:
 
 ## 🏛️ Main Architecture
 
-The core multi-agent platform is driven by the **Main Orchestrator Agent**, powered by **Claude 4.6 Sonnet**. The Orchestrator does not write the complex code itself; instead, it acts as a project manager—understanding the user's intent, maintaining conversation flow, delegating tasks to subagents, and deploying the final artifacts.
+The core multi-agent platform is driven by the **Main Orchestrator Agent**, powered by **Claude 5 Sonnet**. The Orchestrator does not write the complex code itself; instead, it acts as a project manager—understanding the user's intent, maintaining conversation flow, delegating tasks to subagents, and deploying the final artifacts.
 
 ### 🌟 Orchestrator Features & Capabilities
 

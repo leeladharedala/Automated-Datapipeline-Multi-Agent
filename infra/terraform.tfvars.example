@@ -10,7 +10,7 @@ environment  = "dev"
 # ecr_image_tag = "latest"
 
 # Bedrock model for the orchestrator
-# agentcore_model_id = "anthropic.claude-sonnet-4-6-20250514-v1:0"
+# agentcore_model_id = "anthropic.claude-sonnet-5"
 
 # Memory event expiry (days)
 # memory_event_expiry_days = 90

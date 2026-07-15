@@ -41,6 +41,7 @@ RUN python -m uv tool install "awslabs.aws-documentation-mcp-server@latest" || t
 RUN python -c "\
 from importlib.metadata import version; \
 import deepagents; print(f'deepagents {deepagents.__version__}'); \
+assert deepagents.__version__.startswith('0.6'), f'expected deepagents 0.6.x, got {deepagents.__version__}'; \
 import copilotkit; print('copilotkit OK'); \
 import langchain; print(f'langchain {langchain.__version__}'); \
 import langgraph; print(f'langgraph {version(\"langgraph\")}'); \
@@ -53,13 +54,19 @@ from langchain_anthropic import ChatAnthropic; print('ChatAnthropic OK'); \
 from langchain_mcp_adapters.client import MultiServerMCPClient; print('MCP adapters OK'); \
 from langchain.agents.middleware.types import AgentMiddleware; print('AgentMiddleware OK'); \
 from deepagents import create_deep_agent; print('create_deep_agent OK'); \
-from deepagents import CompiledSubAgent; print('CompiledSubAgent OK'); \
+from deepagents import AsyncSubAgent, AsyncSubAgentMiddleware; print('AsyncSubAgent OK'); \
+from langgraph_sdk import get_client, get_sync_client; print('langgraph_sdk OK'); \
 from deepagents.middleware._utils import append_to_system_message; print('deepagents middleware OK'); \
 from langchain.agents.middleware import AgentMiddleware, AgentState, ModelRequest, ModelResponse; print('AgentMiddleware OK'); \
 print('All critical packages verified.'); \
 "
 
 COPY src/ ./src/
+
+# Co-located LangGraph API server config + in-container process launcher
+COPY langgraph.json ./
+COPY entrypoint.sh ./
+RUN chmod +x entrypoint.sh
 
 
 EXPOSE 8080
@@ -77,4 +84,4 @@ ENV MCP_USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 # checking itself by polling /ping. A Docker-level HEALTHCHECK can
 # conflict with AgentCore's container lifecycle management.
 
-CMD ["opentelemetry-instrument", "python", "src/agentcore/server.py"]
+CMD ["./entrypoint.sh"]

@@ -83,3 +83,6 @@ Thumbs.db
 *.pem
 *.key
 *.pub
+
+# Local LangGraph dev-server state
+.langgraph_api/

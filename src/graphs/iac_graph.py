@@ -1,7 +1,7 @@
 """IaC SubAgent Graph — Terraform generation with self-healing validation loop.
 
 Builds a compiled LangGraph StateGraph that:
-1. Researches AWS resource schemas via Gateway MCP tools (agent node — Sonnet 4.6)
+1. Researches AWS resource schemas via Gateway MCP tools (agent node — Sonnet 5)
 2. Generates Terraform HCL files via a mini DeepAgent with write_file (agent node)
 3. Validates with terraform init/validate via a mini DeepAgent with execute (agent node)
 4. Self-heals on validation failure via a mini DeepAgent with edit_file (agent node)
@@ -9,7 +9,7 @@ Builds a compiled LangGraph StateGraph that:
 
 Agent nodes use create_deep_agent to get VFS (write_file, edit_file, read_file)
 and sandbox execution (execute) — artifacts are persisted to AgentCore short-term
-memory via the shared VFS. The research node uses Sonnet 4.6 to intelligently
+memory via the shared VFS. The research node uses Sonnet 5 to intelligently
 call Terraform Registry and AWS Docs MCP tools with correct input schemas.
 """
 
@@ -178,7 +178,7 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
 def _research(state: IaCState, model, tools_cache: dict) -> dict[str, Any]:
     """Agent node: create_deep_agent with MCP tools to research AWS resource schemas.
 
-    Uses Sonnet 4.6 to intelligently call Terraform Registry and AWS Docs MCP
+    Uses Sonnet 5 to intelligently call Terraform Registry and AWS Docs MCP
     tools with the correct input schemas, extracting resource types, arguments,
     and best practices needed for code generation.
 
@@ -186,14 +186,12 @@ def _research(state: IaCState, model, tools_cache: dict) -> dict[str, Any]:
     Terraform Registry and AWS Docs MCP servers on first invocation. The loaded
     tools and client are cached in tools_cache for subsequent calls.
     """
-    from src.graphs.realtime_logs import log_subagent_progress
-    log_subagent_progress("iac-agent", "[system] Starting IaC Agent research node...")
-    log_subagent_progress("iac-agent", "[research] Analyzing target S3 Bucket structure and encryption constraints...")
-    log_subagent_progress("iac-agent", "[research] Inspecting AWS Glue Job Version 4.0 requirement parameters...")
-    log_subagent_progress("iac-agent", "[research] Validating IAM Role & Policy resource access requirements...")
+    from src.graphs.progress import emit_progress
+    emit_progress("iac-agent", "[research] Starting IaC agent research node...")
 
     task = get_task_description(state)
     if not task:
+        emit_progress("iac-agent", "[research] No task description provided; skipping research.")
         return {"research_context": "No task provided."}
 
     # Lazy-load MCP tools if none were provided at build time
@@ -224,10 +222,18 @@ def _research(state: IaCState, model, tools_cache: dict) -> dict[str, Any]:
             logger.info("Loaded %d MCP tools (Terraform Registry + AWS Docs)", len(active_tools))
         except Exception as exc:
             logger.warning("Failed to load MCP tools, proceeding without research: %s", exc)
+            emit_progress("iac-agent", "[research] MCP research tools unavailable; skipping research phase.")
             return {"research_context": "MCP tools unavailable; skipping research phase."}
 
     if not active_tools:
+        emit_progress("iac-agent", "[research] No research tools available; skipping research phase.")
         return {"research_context": "No research tools available."}
+
+    emit_progress(
+        "iac-agent",
+        f"[research] Researching Terraform resource schemas and AWS docs "
+        f"({len(active_tools)} MCP tools available)...",
+    )
 
     with traced_span("agent:iac.research", {
         "agent.graph": "iac",
@@ -242,6 +248,10 @@ def _research(state: IaCState, model, tools_cache: dict) -> dict[str, Any]:
             tools=active_tools,
             _bg_loop_cache=tools_cache,
         )
+    emit_progress(
+        "iac-agent",
+        f"[research] Research complete ({len(response)} chars of findings).",
+    )
     return {"research_context": response, "messages": [AIMessage(content=response)]}
 
 
@@ -287,11 +297,12 @@ def _generate(state: IaCState, model, _bg_loop_cache: dict | None = None) -> dic
     task = get_task_description(state)
     research = state.get("research_context", "")
 
-    from src.graphs.realtime_logs import log_subagent_progress
-    log_subagent_progress("iac-agent", "[generate] Generating provider.tf with AWS provider version requirements...")
-    log_subagent_progress("iac-agent", "[generate] Generating variables.tf specifying configurable pipeline inputs...")
-    log_subagent_progress("iac-agent", "[generate] Compiling main.tf with S3 Bucket, IAM, and Glue Job...")
-    log_subagent_progress("iac-agent", "[generate] Writing outputs.tf to export bucket and job ARNs...")
+    from src.graphs.progress import emit_progress
+    emit_progress(
+        "iac-agent",
+        "[generate] Generating Terraform files "
+        "(provider.tf, variables.tf, main.tf, outputs.tf)...",
+    )
 
     user_msg = f"## Task\n{task}\n\n## Research Context\n{research}"
     with traced_span("agent:iac.generate", {
@@ -303,6 +314,11 @@ def _generate(state: IaCState, model, _bg_loop_cache: dict | None = None) -> dic
         response = _run_agent(_GENERATE_PROMPT, user_msg, model, _bg_loop_cache=_bg_loop_cache)
 
     tf_content = _parse_hcl_blocks(response)
+    emit_progress(
+        "iac-agent",
+        f"[generate] Generated {len(tf_content)} file(s): "
+        f"{', '.join(tf_content) or 'none'}",
+    )
 
     # Track the expected artifact filenames
     tf_artifacts = {
@@ -320,8 +336,8 @@ def _generate(state: IaCState, model, _bg_loop_cache: dict | None = None) -> dic
 
 def _validate(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None = None) -> dict[str, Any]:
     """Agent node: write generated Terraform files into sandbox then run terraform plan."""
-    from src.graphs.realtime_logs import log_subagent_progress
-    log_subagent_progress("iac-agent", "[validate] Initiating Terraform validation in secure sandbox...")
+    from src.graphs.progress import emit_progress
+    emit_progress("iac-agent", "[validate] Running terraform init and plan on the generated files...")
 
     task = get_task_description(state)
     research = state.get("research_context", "")
@@ -329,15 +345,19 @@ def _validate(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None 
     tf_content = state.get("tf_content", {})
 
     # Build shell commands that write the generated files into the sandbox.
-    # Use printf with %s to safely embed arbitrary HCL content without
-    # shell quoting issues — repr() gives us a Python string literal which
-    # we then pass via python -c to write the file.
+    # HCL is full of double quotes and ${...} interpolations, both of which
+    # the shell mangles inside a double-quoted command. Base64 is pure
+    # [A-Za-z0-9+/=], so the payload survives the shell untouched.
+    import base64
     write_cmds = "mkdir -p /infra"
     for fname in ["provider.tf", "variables.tf", "main.tf", "outputs.tf"]:
         content = tf_content.get(fname, "")
-        # Use python3 -c to write the file — avoids all shell quoting issues
-        escaped = repr(content)
-        write_cmds += f" && python3 -c \"open('/infra/{fname}', 'w').write({escaped})\""
+        b64 = base64.b64encode(content.encode()).decode()
+        write_cmds += (
+            f" && python3 -c 'import base64;"
+            f' open("/infra/{fname}", "wb")'
+            f'.write(base64.b64decode("{b64}"))\''
+        )
 
     files_list = ", ".join(artifacts.values()) if artifacts else "unknown"
 
@@ -371,11 +391,10 @@ def _validate(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None 
         # Fallback: absence of explicit FAILED with presence of PASSED
         passed = "PASSED" in upper and "FAILED" not in upper
 
-    from src.graphs.realtime_logs import log_subagent_progress
     if passed:
-        log_subagent_progress("iac-agent", "[validate] Terraform plan PASSED. Infrastructure structure verified successfully!")
+        emit_progress("iac-agent", "[validate] Terraform validation PASSED.")
     else:
-        log_subagent_progress("iac-agent", f"[validate] Terraform plan FAILED:\n{response}")
+        emit_progress("iac-agent", f"[validate] Terraform validation FAILED:\n{response}")
 
     return {
         "validation_passed": passed,
@@ -385,9 +404,9 @@ def _validate(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None 
 
 def _fix(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None = None) -> dict[str, Any]:
     """Agent node: fix broken Terraform files using sandbox execute + browser tools."""
-    from src.graphs.realtime_logs import log_subagent_progress
+    from src.graphs.progress import emit_progress
     attempt = state.get("attempt", 0) + 1
-    log_subagent_progress("iac-agent", f"[fix] Initiating self-healing loop (attempt {attempt})...")
+    emit_progress("iac-agent", f"[fix] Initiating self-healing loop (attempt {attempt})...")
     error_output = state.get("validation_output", "")
     task = get_task_description(state)
 
@@ -446,7 +465,7 @@ def _report(state: IaCState) -> dict[str, Any]:
             file_contents += f"\n\n### {fname}\n(content unavailable)"
 
     if passed:
-        status_line = "VALIDATION: PASSED\nterraform validate completed successfully."
+        status_line = "VALIDATION: PASSED\nterraform plan validation completed successfully."
     else:
         status_line = f"VALIDATION: FAILED ({attempt}/{max_attempts} attempts exhausted)\n\nLAST ERROR:\n{validation_output}"
 

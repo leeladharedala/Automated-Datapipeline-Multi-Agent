@@ -41,37 +41,6 @@ AWS_DOCS_USER_AGENT = os.environ.get(
 )
 
 
-def create_mcp_client() -> MultiServerMCPClient:
-    """Create a MultiServerMCPClient for Terraform + AWS Docs MCP servers.
-
-    .. deprecated::
-        This function is kept for backward compatibility. New code should
-        use ``load_gateway_tools()`` which loads servers independently.
-    """
-    return MultiServerMCPClient(
-        {
-            "terraform": {
-                "command": TERRAFORM_MCP_COMMAND,
-                "args": TERRAFORM_MCP_ARGS,
-                "transport": "stdio",
-                "env": {
-                    "FASTMCP_LOG_LEVEL": "ERROR",
-                },
-            },
-            "aws_docs": {
-                "command": AWS_DOCS_MCP_COMMAND,
-                "args": AWS_DOCS_MCP_ARGS,
-                "transport": "stdio",
-                "env": {
-                    "FASTMCP_LOG_LEVEL": "ERROR",
-                    "AWS_DOCUMENTATION_PARTITION": AWS_DOCS_PARTITION,
-                    "MCP_USER_AGENT": AWS_DOCS_USER_AGENT,
-                },
-            },
-        }
-    )
-
-
 async def load_gateway_tools() -> tuple[list, list]:
     """Load tools from MCP servers independently.
 
