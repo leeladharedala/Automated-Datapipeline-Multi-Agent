@@ -24,6 +24,35 @@ from src.graphs import (
 # Env-driven model defaults, consistent with src/main.py's Supervisor build.
 _MODEL_NAME = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
 
+
+def _resolve_anthropic_key() -> None:
+    """Resolve ANTHROPIC_API_KEY from Secrets Manager for THIS process.
+
+    The ingress (src/agentcore/server.py) resolves the key into its own
+    process env only. The co-located server is a separate process, so without
+    this every sub-agent run fails its first LLM call with "Could not resolve
+    authentication method". Best-effort: local dev may set the key directly.
+    """
+    arn = os.environ.get("ANTHROPIC_API_KEY_SECRET_ARN", "")
+    if not arn or os.environ.get("ANTHROPIC_API_KEY"):
+        return
+    try:
+        import boto3
+
+        region = os.environ.get("AWS_REGION", "us-west-2")
+        client = boto3.client("secretsmanager", region_name=region)
+        resp = client.get_secret_value(SecretId=arn)
+        os.environ["ANTHROPIC_API_KEY"] = resp["SecretString"]
+    except Exception as exc:  # pragma: no cover - depends on AWS environment
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Could not resolve ANTHROPIC_API_KEY from Secrets Manager: %s", exc
+        )
+
+
+_resolve_anthropic_key()
+
 # One shared model for every sub-agent graph on the co-located server.
 _model = ChatAnthropic(model=_MODEL_NAME)
 
