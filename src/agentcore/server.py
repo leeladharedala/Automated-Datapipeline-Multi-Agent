@@ -345,30 +345,55 @@ async def stream_run_relay(client, task: dict, queue: asyncio.Queue) -> None:
             if text:
                 _put(text)
 
-    try:
-        await _consume(
-            client.threads.stream(
-                thread_id=thread_id,
-                run_id=run_id,
-                stream_mode=list(STREAM_RELAY_MODES),
-                on_disconnect="continue",
+    import inspect as _inspect2
+
+    def _supported(func, **kwargs) -> dict:
+        """Drop kwargs the installed langgraph-sdk signature doesn't accept.
+
+        The SDK's streaming API differs across versions (e.g. 0.4.x
+        ``threads.stream`` has no ``run_id`` and ``runs.join_stream`` has no
+        ``stream_resumable``), so filter to what this client supports rather
+        than failing the relay on a TypeError.
+        """
+        try:
+            params = _inspect2.signature(func).parameters
+        except (TypeError, ValueError):
+            return kwargs
+        if any(p.kind is _inspect2.Parameter.VAR_KEYWORD for p in params.values()):
+            return kwargs
+        return {k: v for k, v in kwargs.items() if k in params}
+
+    threads_kwargs = _supported(
+        client.threads.stream,
+        thread_id=thread_id,
+        run_id=run_id,
+        stream_mode=list(STREAM_RELAY_MODES),
+        on_disconnect="continue",
+    )
+    # Only usable as an attach-to-run stream when the SDK accepts run_id;
+    # without it, threads.stream would try to START a new run instead.
+    if "run_id" in threads_kwargs:
+        try:
+            await _consume(client.threads.stream(**threads_kwargs))
+            return
+        except Exception as exc:
+            logger.warning(
+                "threads.stream relay failed for %s (%s); falling back to join_stream",
+                agent_name,
+                exc,
             )
-        )
-        return
-    except Exception as exc:
-        logger.warning(
-            "threads.stream relay failed for %s (%s); falling back to join_stream",
-            agent_name,
-            exc,
-        )
 
     try:
         await _consume(
             client.runs.join_stream(
-                thread_id=thread_id,
-                run_id=run_id,
-                stream_mode=list(STREAM_RELAY_MODES),
-                stream_resumable=True,
+                **_supported(
+                    client.runs.join_stream,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    stream_mode=list(STREAM_RELAY_MODES),
+                    cancel_on_disconnect=False,
+                    stream_resumable=True,
+                )
             )
         )
     except Exception as exc:
