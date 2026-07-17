@@ -254,6 +254,66 @@ async def _sdk_status_overrides(client, async_tasks: dict) -> dict:
 STREAM_RELAY_MODES = ("messages", "updates", "custom")
 
 
+def _patch_subagent_run_stream_modes() -> None:
+    """Make launched sub-agent runs publish the relay's stream modes.
+
+    deepagents' AsyncSubAgentMiddleware calls ``runs.create`` without
+    ``stream_mode``, so the run publishes only the SDK default ("values") and
+    a relay joining for messages/updates/custom receives nothing. Joiners can
+    only see modes the run was created with, so default the created runs to
+    the relay modes too (resumable, so a relay that attaches after the run
+    started still gets its events). setdefault-only: an explicit caller
+    choice always wins.
+    """
+    import inspect as _inspect
+
+    try:
+        from langgraph_sdk.client import RunsClient
+
+        classes = [RunsClient]
+        try:
+            from langgraph_sdk.client import SyncRunsClient
+
+            classes.append(SyncRunsClient)
+        except ImportError:
+            pass
+
+        for cls in classes:
+            orig = cls.create
+            if getattr(orig, "__subagent_stream_patch__", False):
+                continue
+            params = _inspect.signature(orig).parameters
+            defaults: dict = {}
+            if "stream_mode" in params:
+                defaults["stream_mode"] = ["values", *STREAM_RELAY_MODES]
+            if "stream_resumable" in params:
+                defaults["stream_resumable"] = True
+            if not defaults:
+                continue
+
+            if _inspect.iscoroutinefunction(orig):
+
+                async def _patched(self, *args, __orig=orig, __defaults=defaults, **kwargs):
+                    for key, value in __defaults.items():
+                        kwargs.setdefault(key, value)
+                    return await __orig(self, *args, **kwargs)
+
+            else:
+
+                def _patched(self, *args, __orig=orig, __defaults=defaults, **kwargs):
+                    for key, value in __defaults.items():
+                        kwargs.setdefault(key, value)
+                    return __orig(self, *args, **kwargs)
+
+            _patched.__subagent_stream_patch__ = True  # type: ignore[attr-defined]
+            cls.create = _patched
+    except Exception as exc:  # pragma: no cover - depends on SDK internals
+        logger.warning("Could not patch sub-agent run stream modes: %s", exc)
+
+
+_patch_subagent_run_stream_modes()
+
+
 def _get_subagent_client():
     """Async LangGraph SDK client for the co-located server (Process B).
 

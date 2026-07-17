@@ -32,3 +32,15 @@ def log_subagent_progress(agent_name: str, message: str) -> None:
             sub(agent_name, message)
         except Exception as exc:
             logger.warning("Failed to dispatch log to subscriber: %s", exc)
+
+    # Also publish into the LangGraph "custom" stream so the ingress relay
+    # (stream_run_relay joining this run on the co-located server) can forward
+    # the line to the dashboard as realtime_logs. No-op outside a run context.
+    try:
+        from langgraph.config import get_stream_writer
+
+        writer = get_stream_writer()
+        if writer is not None:
+            writer({"agent": agent_name, "message": message})
+    except Exception:
+        pass
