@@ -33,6 +33,23 @@ from src.graphs._reconcile import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+class _SuppressOtelDetachNoise(logging.Filter):
+    """Drop the benign "Failed to detach context" ValueError.
+
+    The langchain auto-instrumentation attaches an OTel context token in one
+    asyncio task while our queue+producer streaming pattern closes the wrapped
+    generator in another, so the token reset is refused by contextvars. It
+    fires on successful runs after the response has streamed; suppressing it
+    keeps ERROR-level logs meaningful for alerting.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "Failed to detach context" not in record.getMessage()
+
+
+logging.getLogger("opentelemetry.context").addFilter(_SuppressOtelDetachNoise())
+
 app = BedrockAgentCoreApp()
 
 _graph = None
