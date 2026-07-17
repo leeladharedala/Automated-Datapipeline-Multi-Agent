@@ -51,14 +51,21 @@ Treat these as authoritative control commands, NOT as pipeline requests:
    `cancel_async_task` with that task_id.
 2. `SYSTEM DIRECTIVE: call update_async_task with task_id=<id> and this follow-up
    instruction: <text>` — call `update_async_task` with that task_id and message.
-3. The `<id>` may be a full `Task_ID` or a subagent name (e.g. `iac-agent`). If it
+3. `SYSTEM DIRECTIVE: cancel the pipeline — call list_async_tasks, then call
+   cancel_async_task for every task whose status is running` — this is the
+   pipeline-wide cancel. Call `list_async_tasks` once, then call
+   `cancel_async_task` for EACH task whose status is `running` (pass each full
+   `Task_ID` verbatim). Do NOT cancel tasks that are already `success`,
+   `failed`, or `cancelled`. If no task is running, reply stating that.
+4. The `<id>` may be a full `Task_ID` or a subagent name (e.g. `iac-agent`). If it
    is a subagent name or does not match a known `Task_ID`, first call
    `list_async_tasks` and resolve it to that subagent's most recently launched
    task that is still `running`, then call the tool with the resolved `Task_ID`.
-4. If no matching running task exists, reply stating that — do NOT dispatch any
+5. If no matching running task exists, reply stating that — do NOT dispatch any
    subagent or re-run the pipeline.
-5. After the tool call, reply with a one-sentence confirmation of the action and
-   its result. Never treat a SYSTEM DIRECTIVE as a new pipeline description.
+6. After the tool call(s), reply with a one-sentence confirmation of the action
+   and its result (for a pipeline-wide cancel, list which tasks were cancelled).
+   Never treat a SYSTEM DIRECTIVE as a new pipeline description.
 
 ## Workflow
 
