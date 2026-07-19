@@ -43,14 +43,22 @@ fi
 # not usable here since AgentCore containers cannot run Docker). --no-reload
 # disables the file watcher so the server is never restarted (and its state
 # wiped) mid-run.
-# Deliberately NOT wrapped in opentelemetry-instrument: auto-instrumenting
-# this process breaks every boto3/requests call in it with "maximum recursion
-# depth exceeded" (Secrets Manager at import, S3 data sampling at run time,
-# and the AWS OTLP log exporter recursing through its own instrumented
-# requests+SigV4 signing). Sub-agent progress reaches CloudWatch via stdout
-# and reaches the dashboard via the run-stream relays; span-level tracing for
-# this process needs a targeted setup, not blanket auto-instrumentation.
-langgraph dev \
+# Instrumented SELECTIVELY: blanket auto-instrumentation broke this process
+# two ways: (a) botocore/requests/urllib3 instrumentation recursed ("maximum
+# recursion depth exceeded" — Secrets Manager at import, S3 sampling at run
+# time, the OTLP log exporter through its own instrumented requests+SigV4
+# path), and (b) the langchain instrumentation mutated replayed assistant
+# messages, turning thinking blocks into API 400s
+# ("thinking.thinking: Field required") that killed every sub-agent run.
+# Both are disabled; httpx instrumentation stays, so Anthropic calls still
+# appear as HTTP spans. The OTLP log exporter is off — this process's logs
+# already reach CloudWatch via stdout. A distinct service.name keeps
+# sub-agent traces distinguishable.
+_SUBAGENT_SERVICE="$(printf '%s' "${OTEL_RESOURCE_ATTRIBUTES:-}" | sed -n 's/.*service\.name=\([^,]*\).*/\1/p')"
+OTEL_SERVICE_NAME="${_SUBAGENT_SERVICE:-multi-agent-pipeline}-subagents" \
+OTEL_LOGS_EXPORTER=none \
+OTEL_PYTHON_DISABLED_INSTRUMENTATIONS="botocore,boto3sqs,requests,urllib,urllib3,langchain" \
+opentelemetry-instrument langgraph dev \
   --host 127.0.0.1 --port 2024 \
   --n-jobs-per-worker 4 \
   --no-reload \

@@ -73,12 +73,13 @@ def _resolve_anthropic_key() -> None:
 _resolve_anthropic_key()
 
 # One shared model for every sub-agent graph on the co-located server.
-# thinking is explicitly disabled: claude-sonnet-5 emits (sometimes empty)
-# thinking blocks by default, and replaying an empty thinking block on the
-# next tool-loop turn 400s with "thinking.thinking: Field required" —
-# which killed every sub-agent run mid-loop. Sub-agents don't surface
-# reasoning anywhere, so nothing is lost by turning it off.
-_model = ChatAnthropic(model=_MODEL_NAME, thinking={"type": "disabled"})
+# Thinking stays ON (model default): disabling it measurably degraded
+# generation quality (iac burned all 3 fix attempts on runs that used to pass
+# first try). The "thinking.thinking: Field required" 400 seen on 2026-07-18
+# was caused by the langchain auto-instrumentation mutating replayed messages
+# when this process ran under opentelemetry-instrument — that instrumentation
+# is excluded in entrypoint.sh, which is the actual fix.
+_model = ChatAnthropic(model=_MODEL_NAME)
 
 # Module-level compiled graph handles referenced by langgraph.json.
 # graph_id values ("iac" / "cicd" / "data-eng") match the AsyncSubAgent specs.

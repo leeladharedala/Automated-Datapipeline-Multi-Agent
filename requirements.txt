@@ -22,6 +22,10 @@ copilotkit>=0.1.94
 langgraph-checkpoint-aws>=1.2.0
 
 # Co-located LangGraph Agent Protocol server + client SDK (async sub-agents)
+# NOTE: langgraph-api 0.10.x is in Critical support (startup banner nags to
+# upgrade), but pinning >=0.11 is ResolutionImpossible against
+# aws-opentelemetry-distro==0.16.0 / langgraph-sdk — upgrading needs the OTel
+# distro pin reworked first. The banner is advisory; 0.10.3 works.
 langgraph-api>=0.10.1
 langgraph-cli>=0.4.30
 langgraph-sdk>=0.4.2

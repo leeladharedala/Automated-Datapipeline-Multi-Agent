@@ -747,7 +747,18 @@ async def invocations(payload, context: RequestContext):
         relayed_task_ids: set[str] = set()
         relay_client = None
         RELAY_RESOLVE_ATTEMPTS = 30  # ~30s for the channel entry to appear
-        RELAY_MAX_WAIT = float(os.environ.get("SUBAGENT_RELAY_MAX_WAIT_SECONDS", "840"))
+        # How long the stream stays open after the launch turn waiting for the
+        # sub-agent runs to reach terminal status. A full fan-out with
+        # self-healing fix loops (3 terraform-plan attempts) can exceed 20
+        # minutes, so default generously; keepalives hold the connection.
+        RELAY_MAX_WAIT = float(os.environ.get("SUBAGENT_RELAY_MAX_WAIT_SECONDS", "1500"))
+        # Cadence of SDK-verified runs.get status polls while holding.
+        STATUS_POLL_INTERVAL = 20.0
+        last_status_poll = 0.0
+        # Per-TASK terminality from the latest status event (see
+        # _event_tasks_terminal) — the continuation gate and the stream-hold
+        # decision both key off this, never off the per-agent aggregate.
+        last_tasks_terminal = False
 
         async def _spawn_relay_for(agent_name: str) -> None:
             """Resolve the launched agent's task entry, announce its task_id,
@@ -815,10 +826,30 @@ async def invocations(payload, context: RequestContext):
         continuation_done = False
         last_statuses: dict = {}
 
+        TERMINAL_STATUSES = ("success", "failed", "cancelled")
+
         def _all_terminal(statuses: dict) -> bool:
             return bool(statuses) and all(
-                s in ("success", "failed", "cancelled") for s in statuses.values()
+                s in TERMINAL_STATUSES for s in statuses.values()
             )
+
+        def _event_tasks_terminal(event: dict | None, fallback: dict) -> bool:
+            """True when every tracked TASK is terminal.
+
+            The per-agent ``dispatch_statuses`` aggregate uses success-wins
+            precedence, so an agent with an old successful task and a fresh
+            RUNNING retry task still aggregates to "success" — gating the
+            continuation on it fires while the retry is seconds old (observed
+            in production). The per-task ``tasks`` payload has no aggregation,
+            so prefer it; fall back to the aggregate when absent.
+            """
+            tasks_payload = (event or {}).get("tasks") or {}
+            if tasks_payload:
+                return all(
+                    isinstance(t, dict) and t.get("status") in TERMINAL_STATUSES
+                    for t in tasks_payload.values()
+                )
+            return _all_terminal(fallback)
 
         async def _post_relay_event() -> dict | None:
             """SDK-verified terminal statuses after the relay phase ends."""
@@ -842,36 +873,48 @@ async def invocations(payload, context: RequestContext):
         try:
             while True:
                 if producer_done:
-                    # The Supervisor turn is over; stay open only while relays
-                    # are still streaming sub-agent progress (bounded).
+                    # The Supervisor turn is over. The stream stays open while
+                    # launched tasks are still running on the co-located server
+                    # (bounded by the deadline) — TASK STATUS decides when to
+                    # move on, not relay liveness: in production a relay can
+                    # attach to a stream that publishes nothing and just sit
+                    # silent, and it can also die early while its run keeps
+                    # executing. So poll runs.get periodically and start the
+                    # continuation the moment every launched task is terminal.
+                    now = asyncio.get_event_loop().time()
                     active_relays = [t for t in relay_tasks if not t.done()]
-                    if (not active_relays and queue.empty()) or (
-                        relay_deadline is not None
-                        and asyncio.get_event_loop().time() > relay_deadline
+                    deadline_passed = (
+                        relay_deadline is not None and now > relay_deadline
+                    )
+                    relays_settled = not active_relays and queue.empty()
+
+                    if launched_calls and not continuation_done and (
+                        relays_settled
+                        or deadline_passed
+                        or now - last_status_poll >= STATUS_POLL_INTERVAL
                     ):
-                        # Relay phase over (or never started). Emit the final
-                        # SDK-verified statuses, then either auto-continue the
-                        # Supervisor once or end the stream. The sub-agent runs
-                        # have finished streaming, but the async_tasks channel
-                        # stays stale until the Supervisor next checks — hence
-                        # the SDK-verified event (and the continuation turn,
-                        # which does exactly that check).
-                        if relays_outlived_producer:
-                            event = await _post_relay_event()
-                            if event:
+                        last_status_poll = now
+                        event = await _post_relay_event()
+                        if event:
+                            new_statuses = dict(
+                                event.get("dispatch_statuses") or {}
+                            )
+                            if new_statuses != last_statuses:
                                 logger.info(
-                                    "Post-relay terminal statuses: %s",
-                                    event.get("dispatch_statuses"),
+                                    "SDK-verified dispatch statuses: %s",
+                                    new_statuses,
                                 )
-                                last_statuses = dict(
-                                    event.get("dispatch_statuses") or {}
-                                )
+                                last_statuses = new_statuses
                                 yield event
-                        if (
-                            not continuation_done
-                            and launched_calls
-                            and _all_terminal(last_statuses)
-                        ):
+                            last_tasks_terminal = _event_tasks_terminal(
+                                event, last_statuses
+                            )
+                        if last_tasks_terminal:
+                            # Sub-agent work is done; silent relays are now
+                            # pointless — cancel them so they can't hold the
+                            # stream open.
+                            for t in relay_tasks:
+                                t.cancel()
                             continuation_done = True
                             producer_done = False
                             relays_outlived_producer = False
@@ -890,6 +933,22 @@ async def invocations(payload, context: RequestContext):
                                 _stream_producer(CONTINUATION_DIRECTIVE)
                             )
                             continue
+
+                    still_waiting_for_tasks = (
+                        launched_calls
+                        and not continuation_done
+                        and not last_tasks_terminal
+                    )
+                    if deadline_passed or (
+                        relays_settled and not still_waiting_for_tasks
+                    ):
+                        if deadline_passed and still_waiting_for_tasks:
+                            logger.warning(
+                                "Hold deadline reached with tasks still "
+                                "running (%s) — closing stream; the status "
+                                "poller / next user turn picks up from here",
+                                last_statuses,
+                            )
                         break
                     try:
                         item = await asyncio.wait_for(queue.get(), timeout=1.0)
@@ -925,19 +984,30 @@ async def invocations(payload, context: RequestContext):
                             task_map,
                         )
                         last_statuses = dict(event.get("dispatch_statuses") or {})
+                        last_tasks_terminal = _event_tasks_terminal(
+                            event, last_statuses
+                        )
                         yield event
 
                     producer_done = True
                     relays_outlived_producer = any(
                         not t.done() for t in relay_tasks
                     )
-                    if relays_outlived_producer:
+                    # Arm the hold deadline off LAUNCHES, not relay liveness —
+                    # a relay dying early must not close the stream while its
+                    # run is still executing.
+                    if (
+                        launched_calls
+                        and not continuation_done
+                        and relay_deadline is None
+                    ):
                         relay_deadline = (
                             asyncio.get_event_loop().time() + RELAY_MAX_WAIT
                         )
                         logger.info(
-                            "Supervisor turn complete; keeping stream open for "
-                            "%d active sub-agent relay(s)",
+                            "Supervisor turn complete; holding stream open for "
+                            "%d launched task(s) (%d relay(s) active)",
+                            len(launched_calls),
                             sum(1 for t in relay_tasks if not t.done()),
                         )
                     continue
