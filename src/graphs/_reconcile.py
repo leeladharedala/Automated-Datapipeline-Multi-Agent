@@ -170,6 +170,22 @@ def reconcile(async_tasks: dict, summaries: dict) -> tuple[dict, dict]:
 
         derived = derive_dispatch_status(task.get("status"))
 
+        summary = summaries.get(str(task_id))
+        if summary is None:
+            summary = summaries.get(agent_name)
+
+        # A run can complete with SDK status "success" while its REPORT says
+        # the validation failed (self-heal attempts exhausted). Showing
+        # "success" for it misled operators into expecting a PR — surface the
+        # report's verdict instead, and don't count it as a usable result.
+        if (
+            derived == "success"
+            and isinstance(summary, str)
+            and summary.lstrip().startswith("VALIDATION: FAILED")
+        ):
+            derived = "failed"
+            summary = None
+
         # Aggregate per agent by precedence so success surfaces on the dashboard.
         current = dispatch_statuses.get(agent_name)
         if current is None or (
@@ -178,9 +194,6 @@ def reconcile(async_tasks: dict, summaries: dict) -> tuple[dict, dict]:
             dispatch_statuses[agent_name] = derived
 
         if derived == "success":
-            summary = summaries.get(str(task_id))
-            if summary is None:
-                summary = summaries.get(agent_name)
             accumulated_results[agent_name] = summary if summary is not None else ""
 
     return dispatch_statuses, accumulated_results

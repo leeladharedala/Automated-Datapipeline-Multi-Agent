@@ -157,10 +157,13 @@ def _parse_yaml_blocks(response: str) -> dict[str, str]:
     content: dict[str, str] = {}
 
     # Try named blocks first: ```yaml:filename.yml (or .yaml). Keys are
-    # normalized to the .yml spelling the rest of the pipeline expects
-    # (artifact paths, sandbox writes, PR file paths).
+    # normalized to the basename + .yml spelling the rest of the pipeline
+    # expects (artifact paths, sandbox writes, PR file paths) — the model
+    # sometimes writes path-qualified names like
+    # ```yaml:.github/workflows/deploy.yml.
     named = _re.findall(r"```(?:yaml:)([\w./]+\.ya?ml)\n(.*?)```", response, _re.DOTALL)
     for fname, code in named:
+        fname = fname.rsplit("/", 1)[-1]
         if fname.endswith(".yaml"):
             fname = fname[: -len(".yaml")] + ".yml"
         content[fname] = code.strip()

@@ -317,7 +317,10 @@ def _parse_code_blocks(response: str) -> dict[str, str]:
         _re.DOTALL,
     )
     for fname, code in named:
-        content[fname] = code.strip()
+        # Basename: the model sometimes writes path-qualified names
+        # (```python:tests/test_transform.py) while every downstream consumer
+        # keys by the bare filename.
+        content[fname.rsplit("/", 1)[-1]] = code.strip()
 
     if "transform.py" in content:
         return content

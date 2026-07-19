@@ -269,10 +269,14 @@ def _parse_hcl_blocks(response: str) -> dict[str, str]:
     import re as _re
     content: dict[str, str] = {}
 
-    # Try named blocks first: ```hcl:filename.tf
+    # Try named blocks first: ```hcl:filename.tf. Normalize to the basename:
+    # the model sometimes writes path-qualified names (```hcl:infra/outputs.tf),
+    # and every downstream consumer (validate guard, sandbox writes, report,
+    # PR_FILES_JSON) keys by the bare filename — a prefixed key made outputs.tf
+    # "missing" through three self-heal attempts in production.
     named = _re.findall(r"```(?:hcl:)([\w./]+\.tf)\n(.*?)```", response, _re.DOTALL)
     for fname, code in named:
-        content[fname] = code.strip()
+        content[fname.rsplit("/", 1)[-1]] = code.strip()
 
     if "main.tf" in content:
         return content

@@ -40,6 +40,76 @@ class _SuppressOtelDetachNoise(logging.Filter):
 
 logging.getLogger("opentelemetry.context").addFilter(_SuppressOtelDetachNoise())
 
+
+def _setup_otlp_log_export() -> None:
+    """Ship this process's log records to CloudWatch's OTLP endpoint
+    (the ``otel-rt-logs`` stream) WITHOUT auto-instrumentation.
+
+    ``opentelemetry-instrument`` cannot run here — the ADOT configurator
+    patches botocore unconditionally and every boto3 call (Secrets Manager,
+    S3 data sampling) dies with "maximum recursion depth exceeded". But log
+    EXPORT needs no instrumentation at all: hand-construct the same
+    SigV4-signing exporter the distro uses, attach it as a stdlib logging
+    handler, and leave every library unpatched. The endpoint and
+    log-group/stream headers are injected into the container env by the
+    AgentCore platform; if they're absent (local dev), this is a no-op and
+    logs keep flowing to stdout only.
+    """
+    try:
+        endpoint = os.environ.get("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
+        headers_env = os.environ.get("OTEL_EXPORTER_OTLP_LOGS_HEADERS", "")
+        pairs = dict(p.split("=", 1) for p in headers_env.split(",") if "=" in p)
+        log_group = pairs.get("x-aws-log-group")
+        log_stream = pairs.get("x-aws-log-stream")
+        if not (endpoint and log_group and log_stream):
+            return
+
+        from botocore.session import Session
+        from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+        from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+        from opentelemetry.sdk.resources import Resource
+
+        try:
+            from amazon.opentelemetry.distro.exporter.otlp.aws.logs.otlp_aws_log_record_exporter import (  # noqa: E501
+                OTLPAwsLogRecordExporter as _Exporter,
+            )
+        except ImportError:  # class name differs across distro versions
+            from amazon.opentelemetry.distro.exporter.otlp.aws.logs.otlp_aws_log_record_exporter import (  # noqa: E501
+                OTLPAwsLogExporter as _Exporter,
+            )
+
+        raw_attrs = os.environ.get("OTEL_RESOURCE_ATTRIBUTES", "")
+        base_service = dict(
+            p.split("=", 1) for p in raw_attrs.split(",") if "=" in p
+        ).get("service.name", "multi-agent-pipeline")
+        resource = Resource.create(
+            {
+                "service.name": f"{base_service}-subagents",
+                "aws.service.type": "gen_ai_agent",
+            }
+        )
+        exporter = _Exporter(
+            aws_region=os.environ.get("AWS_REGION", "us-west-2"),
+            session=Session(),
+            log_group=log_group,
+            log_stream=log_stream,
+            endpoint=endpoint,
+        )
+        provider = LoggerProvider(resource=resource)
+        provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
+        handler = LoggingHandler(level=logging.INFO, logger_provider=provider)
+        logging.getLogger().addHandler(handler)
+        logging.getLogger(__name__).info(
+            "Sub-agent OTLP log export active → %s (%s)", log_group, log_stream
+        )
+    except Exception as exc:  # pragma: no cover - depends on platform env
+        logging.getLogger(__name__).warning(
+            "Sub-agent OTLP log export not configured (%s); stdout only", exc
+        )
+
+
+_setup_otlp_log_export()
+
 # Env-driven model defaults, consistent with src/main.py's Supervisor build.
 _MODEL_NAME = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
 
