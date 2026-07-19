@@ -47,8 +47,12 @@ async def build_agent():
     # empty thinking blocks claude-sonnet-5 sometimes emits, which otherwise
     # 400 when the checkpointed history is replayed on a later turn
     # ("thinking.thinking: Field required") — see src/anthropic_model.py.
+    # max_tokens MUST be explicit (the profiles package is absent, so the
+    # library falls back to 4096 — far too small for the Supervisor's
+    # submit_pr call, whose args inline every generated file).
     model = SanitizedChatAnthropic(
         model="claude-sonnet-5",
+        max_tokens=64000,
     )
 
     # Async sub-agent specs. A spec containing `graph_id` triggers deepagents to

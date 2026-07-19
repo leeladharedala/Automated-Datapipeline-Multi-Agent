@@ -162,7 +162,13 @@ _resolve_anthropic_key()
 # first try). SanitizedChatAnthropic strips the empty thinking blocks that
 # otherwise 400 on replay ("thinking.thinking: Field required") — see
 # src/anthropic_model.py.
-_model = SanitizedChatAnthropic(model=_MODEL_NAME)
+# max_tokens MUST be explicit: without langchain-model-profiles installed,
+# ChatAnthropic falls back to 4096, and adaptive thinking consumes that
+# budget before the visible output — responses truncated mid-fence
+# ("Generated 0 workflow file(s)") and burned entire self-heal budgets.
+# Verified: the same generate prompt yields both complete workflow files at
+# 32k where it produced a 370-char stub at the 4096 fallback.
+_model = SanitizedChatAnthropic(model=_MODEL_NAME, max_tokens=64000)
 
 # Module-level compiled graph handles referenced by langgraph.json.
 # graph_id values ("iac" / "cicd" / "data-eng") match the AsyncSubAgent specs.
