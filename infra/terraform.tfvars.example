@@ -22,5 +22,13 @@ environment  = "dev"
 # S3 bucket for browser session recordings (leave empty to disable)
 # browser_recording_s3_bucket = "my-browser-recordings-bucket"
 
+# Extra S3 buckets the Data Engineering agent may sample raw data from.
+# Buckets named "${project_name}-*" are already readable via the s3-access
+# policy — list ARNs here ONLY for data sources outside that naming scheme.
+# NOTE: the raw-data location in a Pipeline Document must be a real bucket;
+# a placeholder like s3://your-bucket-name/... fails sampling with
+# AccessDenied because that bucket belongs to someone else (or nobody).
+# data_source_s3_arns = ["arn:aws:s3:::my-external-data-bucket"]
+
 # CloudWatch log retention (days)
 # log_retention_days = 30

@@ -228,6 +228,22 @@ def _validate(state: CICDState, model, sandbox=None) -> dict[str, Any]:
     artifacts = state.get("workflow_artifacts", {})
     workflow_content = state.get("workflow_content", {})
 
+    # Guard: nothing to validate. Without this, empty files get written into
+    # the sandbox and actionlint trivially passes, producing a PASSED report
+    # whose PR_FILES_JSON is empty. Fail fast so the fix loop regenerates
+    # the fenced blocks instead.
+    missing = [f for f in ("deploy.yml", "destroy.yml") if not workflow_content.get(f)]
+    if missing:
+        output = (
+            "VALIDATION: FAILED\n"
+            f"No workflow content was parsed for: {', '.join(missing)}. "
+            "The previous response did not contain the required fenced blocks. "
+            "Respond with the complete file content in fenced blocks named "
+            "```yaml:deploy.yml and ```yaml:destroy.yml."
+        )
+        emit_progress("cicd-agent", f"[validate] {output}")
+        return {"validation_passed": False, "validation_output": output}
+
     # Build shell commands that write the generated files into the sandbox.
     # Workflow YAML is full of double quotes and ${{ ... }} expressions, both
     # of which the shell mangles inside a double-quoted command. Base64 is
@@ -339,11 +355,6 @@ def _report(state: CICDState) -> dict[str, Any]:
         else:
             file_contents += f"\n\n### {fname}\n(content unavailable)"
 
-    if passed:
-        status_line = "VALIDATION: PASSED\nactionlint completed successfully."
-    else:
-        status_line = f"VALIDATION: FAILED ({attempt}/{max_attempts} attempts exhausted)\n\nLAST ERROR:\n{validation_output}"
-
     # Structured JSON block at the end — the orchestrator extracts files from
     # this block directly instead of parsing fenced YAML blocks.
     pr_files = {
@@ -351,6 +362,22 @@ def _report(state: CICDState) -> dict[str, Any]:
         for fname in ["deploy.yml", "destroy.yml"]
         if workflow_content.get(fname)
     }
+
+    # Integrity guard: a PASSED report with an incomplete PR_FILES_JSON is a
+    # lie the orchestrator would turn into a broken PR. Downgrade to FAILED.
+    expected = {f".github/workflows/{f}" for f in ("deploy.yml", "destroy.yml")}
+    if passed and set(pr_files) != expected:
+        passed = False
+        missing = ", ".join(sorted(p.rsplit("/", 1)[-1] for p in expected - set(pr_files)))
+        validation_output = (
+            f"Validation reported success but file content is missing for: {missing}. "
+            "The generated workflow content was never captured — do not submit these files."
+        )
+
+    if passed:
+        status_line = "VALIDATION: PASSED\nactionlint completed successfully."
+    else:
+        status_line = f"VALIDATION: FAILED ({attempt}/{max_attempts} attempts exhausted)\n\nLAST ERROR:\n{validation_output}"
     structured_block = (
         "\n\n<!-- PR_FILES_JSON\n"
         + _json.dumps(pr_files, indent=2)

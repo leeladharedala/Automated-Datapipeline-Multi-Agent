@@ -17,8 +17,8 @@ import os
 from deepagents import create_deep_agent
 from deepagents.middleware.async_subagents import AsyncSubAgent  # preview API (0.6.x)
 from langchain_anthropic import ChatAnthropic
-from langgraph_checkpoint_aws import AgentCoreMemorySaver
 
+from src.checkpointer import FastAgentCoreMemorySaver
 from src.prompts.orchestrator_prompt import ORCHESTRATOR_PROMPT
 from src.graphs import OrchestratorMiddleware
 from src.tools.submit_pr import submit_pr
@@ -80,8 +80,11 @@ async def build_agent():
     # here — a throttled saver previously skipped the final checkpoint of a
     # pipeline run, leaving the next turn with no conversation history and
     # causing the LLM to re-dispatch all subagents from scratch.
+    # FastAgentCoreMemorySaver keeps DeltaChannel (messages) history loads at
+    # one event fetch instead of one per ancestor checkpoint — without it every
+    # state load takes minutes once a thread has real history.
     # Subagent persistence is owned by the co-located server, not this process.
-    checkpointer = AgentCoreMemorySaver(memory_id=MEMORY_ID, region_name=REGION)
+    checkpointer = FastAgentCoreMemorySaver(memory_id=MEMORY_ID, region_name=REGION)
 
     # Pass tools directly — skip tracing wrappers to avoid
     # Pydantic v2 compatibility issues during agent compilation.

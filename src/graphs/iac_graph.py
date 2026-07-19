@@ -344,6 +344,26 @@ def _validate(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None 
     artifacts = state.get("tf_artifacts", {})
     tf_content = state.get("tf_content", {})
 
+    # Guard: nothing to validate. Without this, empty files get written into
+    # the sandbox and terraform plan can pass on a partial config, producing
+    # a PASSED report with missing files. Fail fast so the fix loop
+    # regenerates the fenced blocks instead.
+    missing = [
+        f for f in ("provider.tf", "variables.tf", "main.tf", "outputs.tf")
+        if not tf_content.get(f)
+    ]
+    if missing:
+        output = (
+            "VALIDATION: FAILED\n"
+            f"No Terraform content was parsed for: {', '.join(missing)}. "
+            "The previous response did not contain the required fenced blocks. "
+            "Respond with the complete file content in fenced blocks named "
+            "```hcl:provider.tf, ```hcl:variables.tf, ```hcl:main.tf and "
+            "```hcl:outputs.tf."
+        )
+        emit_progress("iac-agent", f"[validate] {output}")
+        return {"validation_passed": False, "validation_output": output}
+
     # Build shell commands that write the generated files into the sandbox.
     # HCL is full of double quotes and ${...} interpolations, both of which
     # the shell mangles inside a double-quoted command. Base64 is pure
@@ -464,11 +484,6 @@ def _report(state: IaCState) -> dict[str, Any]:
         else:
             file_contents += f"\n\n### {fname}\n(content unavailable)"
 
-    if passed:
-        status_line = "VALIDATION: PASSED\nterraform plan validation completed successfully."
-    else:
-        status_line = f"VALIDATION: FAILED ({attempt}/{max_attempts} attempts exhausted)\n\nLAST ERROR:\n{validation_output}"
-
     # Structured JSON block at the end — the orchestrator extracts files from
     # this block directly instead of parsing fenced HCL blocks, which is
     # fragile when reports are long or content contains special characters.
@@ -478,6 +493,24 @@ def _report(state: IaCState) -> dict[str, Any]:
         for fname in ["provider.tf", "variables.tf", "main.tf", "outputs.tf"]
         if tf_content.get(fname)
     }
+
+    # Integrity guard: a PASSED report with an incomplete PR_FILES_JSON is a
+    # lie the orchestrator would turn into a broken PR. Downgrade to FAILED.
+    expected = {
+        f"infra/{f}" for f in ("provider.tf", "variables.tf", "main.tf", "outputs.tf")
+    }
+    if passed and set(pr_files) != expected:
+        passed = False
+        missing_files = ", ".join(sorted(p.rsplit("/", 1)[-1] for p in expected - set(pr_files)))
+        validation_output = (
+            f"Validation reported success but file content is missing for: {missing_files}. "
+            "The generated Terraform content was never captured — do not submit these files."
+        )
+
+    if passed:
+        status_line = "VALIDATION: PASSED\nterraform plan validation completed successfully."
+    else:
+        status_line = f"VALIDATION: FAILED ({attempt}/{max_attempts} attempts exhausted)\n\nLAST ERROR:\n{validation_output}"
     structured_block = (
         "\n\n<!-- PR_FILES_JSON\n"
         + _json.dumps(pr_files, indent=2)

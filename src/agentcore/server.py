@@ -80,6 +80,20 @@ _graph = None
 # Sub-agent types launchable as async tasks (matches the AsyncSubAgent specs).
 _ASYNC_SUBAGENT_TYPES = frozenset({"iac-agent", "cicd-agent", "data-eng-agent"})
 
+# Injected as a synthetic user turn by `invocations` once every task launched
+# in that invocation has reached a terminal status, so results collection and
+# PR submission do not depend on the user manually prompting again. Documented
+# in ORCHESTRATOR_PROMPT's "Control Directives" section — keep the two in sync.
+CONTINUATION_DIRECTIVE = (
+    "SYSTEM DIRECTIVE: all dispatched subagent tasks have reached a terminal "
+    "status — collect results and continue the workflow. Call "
+    "list_async_tasks once, then check_async_task for each task, then proceed "
+    "per your instructions: if all subagents passed, merge their "
+    "PR_FILES_JSON blocks and call submit_pr, then report the PR link. If "
+    "any subagent failed, summarize the failure and ask the user how to "
+    "proceed."
+)
+
 
 def _merge_tool_call_fragments(partial: dict, dumped: dict) -> list[dict]:
     """Merge streamed tool-call fragments (by index) and return the current view.
@@ -216,6 +230,27 @@ def _status_event_from_state(
     if tasks_payload:
         event["tasks"] = tasks_payload
     return event
+
+
+async def _read_state_values(graph, config: dict) -> dict:
+    """Read persisted channel values via ONE checkpoint fetch.
+
+    ``graph.aget_state`` reconstructs every channel — including the deepagents
+    ``messages`` DeltaChannel, which replays the thread's full write history.
+    The callers here only need the ``async_tasks`` channel (plus whatever else
+    happens to be stored inline), so read the checkpoint tuple directly from
+    the checkpointer instead. ``messages`` is typically absent from the
+    returned dict (it lives behind the delta scheme); downstream helpers
+    already tolerate that.
+    """
+    checkpointer = getattr(graph, "checkpointer", None)
+    if checkpointer is None:
+        snapshot = await graph.aget_state(config)
+        return getattr(snapshot, "values", None) or {}
+    tup = await checkpointer.aget_tuple(config)
+    if tup is None:
+        return {}
+    return (tup.checkpoint or {}).get("channel_values") or {}
 
 
 async def _sdk_status_overrides(client, async_tasks: dict) -> dict:
@@ -375,17 +410,22 @@ def _relay_log_text(event: str, data) -> str | None:
 async def stream_run_relay(client, task: dict, queue: asyncio.Queue) -> None:
     """Relay a background sub-agent run's stream into the SSE queue.
 
-    PRIMARY path (Req 18.2/18.7/18.8): ``client.threads.stream(thread_id,
-    run_id, stream_mode=[messages, updates, custom], on_disconnect="continue")``
-    — the SDK reconnects/replays transparently and never cancels the run.
-    FALLBACK path (Req 18.3): ``client.runs.join_stream(...,
-    stream_resumable=True)``. Progress is advisory (Req 18.9): if both paths
-    fail the relay returns quietly and never breaks the top-level stream.
+    Attempts attach paths from most to least capable and downgrades on
+    ``TypeError`` (the installed langgraph-sdk rejecting a kwarg it doesn't
+    know). Signature inspection is NOT used here: in production the pinned
+    SDK's method signatures defeat ``inspect``-based filtering (both
+    ``threads.stream(run_id=...)`` and ``join_stream(stream_resumable=...)``
+    passed the filter yet raised ``TypeError`` at call time), which silently
+    killed every relay. Probing with the real call is the only reliable
+    capability check — a ``TypeError`` fires before any request is sent, so
+    an unsupported ``threads.stream`` can never start a spurious run.
+    Progress is advisory (Req 18.9): if every path fails the relay returns
+    quietly and never breaks the top-level stream.
     """
     agent_name = task.get("agent_name") or ""
     thread_id = task.get("thread_id")
     run_id = task.get("run_id")
-    if not agent_name or not thread_id:
+    if not agent_name or not thread_id or not run_id:
         return
 
     def _put(text: str) -> None:
@@ -405,63 +445,64 @@ async def stream_run_relay(client, task: dict, queue: asyncio.Queue) -> None:
             if text:
                 _put(text)
 
-    import inspect as _inspect2
-
-    def _supported(func, **kwargs) -> dict:
-        """Drop kwargs the installed langgraph-sdk signature doesn't accept.
-
-        The SDK's streaming API differs across versions (e.g. 0.4.x
-        ``threads.stream`` has no ``run_id`` and ``runs.join_stream`` has no
-        ``stream_resumable``), so filter to what this client supports rather
-        than failing the relay on a TypeError.
-        """
-        try:
-            params = _inspect2.signature(func).parameters
-        except (TypeError, ValueError):
-            return kwargs
-        if any(p.kind is _inspect2.Parameter.VAR_KEYWORD for p in params.values()):
-            return kwargs
-        return {k: v for k, v in kwargs.items() if k in params}
-
-    threads_kwargs = _supported(
-        client.threads.stream,
-        thread_id=thread_id,
-        run_id=run_id,
-        stream_mode=list(STREAM_RELAY_MODES),
-        on_disconnect="continue",
+    # Most → least capable. A TypeError means the installed SDK doesn't accept
+    # one of the kwargs — downgrade to the next shape. Any other error means
+    # the stream itself failed (e.g. run already gone) — also try the next
+    # shape, since join_stream can attach where threads.stream cannot.
+    attempts = (
+        (
+            "threads.stream",
+            lambda: client.threads.stream(
+                thread_id=thread_id,
+                run_id=run_id,
+                stream_mode=list(STREAM_RELAY_MODES),
+                on_disconnect="continue",
+            ),
+        ),
+        (
+            "runs.join_stream(resumable)",
+            lambda: client.runs.join_stream(
+                thread_id=thread_id,
+                run_id=run_id,
+                stream_mode=list(STREAM_RELAY_MODES),
+                cancel_on_disconnect=False,
+                stream_resumable=True,
+            ),
+        ),
+        (
+            "runs.join_stream",
+            lambda: client.runs.join_stream(
+                thread_id=thread_id,
+                run_id=run_id,
+                stream_mode=list(STREAM_RELAY_MODES),
+                cancel_on_disconnect=False,
+            ),
+        ),
+        (
+            "runs.join_stream(minimal)",
+            lambda: client.runs.join_stream(thread_id=thread_id, run_id=run_id),
+        ),
     )
-    # Only usable as an attach-to-run stream when the SDK accepts run_id;
-    # without it, threads.stream would try to START a new run instead.
-    if "run_id" in threads_kwargs:
+    for path_name, factory in attempts:
         try:
-            await _consume(client.threads.stream(**threads_kwargs))
+            await _consume(factory())
             return
-        except Exception as exc:
-            logger.warning(
-                "threads.stream relay failed for %s (%s); falling back to join_stream",
+        except TypeError as exc:
+            logger.info(
+                "Relay path %s not supported by this langgraph-sdk for %s (%s); "
+                "trying next",
+                path_name,
                 agent_name,
                 exc,
             )
-
-    try:
-        await _consume(
-            client.runs.join_stream(
-                **_supported(
-                    client.runs.join_stream,
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    stream_mode=list(STREAM_RELAY_MODES),
-                    cancel_on_disconnect=False,
-                    stream_resumable=True,
-                )
+        except Exception as exc:
+            logger.warning(
+                "Relay path %s failed for %s (%s); trying next",
+                path_name,
+                agent_name,
+                exc,
             )
-        )
-    except Exception as exc:
-        logger.warning(
-            "join_stream relay failed for %s (%s) — progress relay skipped",
-            agent_name,
-            exc,
-        )
+    logger.warning("All relay paths failed for %s — progress relay skipped", agent_name)
 
 
 def _resolve_secrets():
@@ -515,8 +556,7 @@ async def invocations(payload, context: RequestContext):
                 "runtimeSessionId", "default-session"
             )
             config = {"configurable": {"thread_id": session_id, "actor_id": session_id}}
-            snapshot = await graph.aget_state(config)
-            state_values = getattr(snapshot, "values", None) or {}
+            state_values = await _read_state_values(graph, config)
             overrides: dict = {}
             try:
                 client = _get_subagent_client()
@@ -582,8 +622,13 @@ async def invocations(payload, context: RequestContext):
         SENTINEL = object()
         KEEPALIVE_INTERVAL = 15  # seconds
 
-        async def _stream_producer():
-            """Drive the Supervisor's `stream_events(version="v3")` run and push
+        # Final state values of the most recent Supervisor run, captured from
+        # the run's own values projection — lets the end-of-stream reconcile
+        # skip a full (checkpoint-backed) state read entirely.
+        final_state: dict = {}
+
+        async def _stream_producer(turn_input: str):
+            """Drive one Supervisor `stream_events(version="v3")` turn and push
             message-chunk items into the SSE queue (Req 18.1).
 
             Replaces the prior ``graph.astream(stream_mode="messages")``
@@ -605,7 +650,7 @@ async def invocations(payload, context: RequestContext):
 
             try:
                 run = await graph.astream_events(
-                    {"messages": [("user", user_query)]},
+                    {"messages": [("user", turn_input)]},
                     config=config,
                     version="v3",
                 )
@@ -670,6 +715,16 @@ async def invocations(payload, context: RequestContext):
                                 ),
                                 node,
                             )
+
+                    # The graph is exhausted once run.messages ends, so this
+                    # returns the already-observed final state immediately —
+                    # no extra pumping, no checkpoint round-trip.
+                    try:
+                        values = await run.output()
+                        if isinstance(values, dict):
+                            final_state["values"] = values
+                    except Exception as exc:
+                        logger.warning("Could not capture final run values: %s", exc)
             except Exception as exc:
                 await queue.put(exc)
             finally:
@@ -705,11 +760,19 @@ async def invocations(payload, context: RequestContext):
                 logger.warning("Sub-agent SDK client unavailable, no relay: %s", exc)
                 return
             for _ in range(RELAY_RESOLVE_ATTEMPTS):
-                try:
-                    snapshot = await graph.aget_state(config)
-                    values = getattr(snapshot, "values", None) or {}
-                except Exception:
-                    values = {}
+                # Cheap resolution: the launch tool writes the async_tasks
+                # entry into checkpointed state; one tuple read gets it. The
+                # captured final run values (if the turn already ended) are
+                # checked first — zero I/O.
+                values = final_state.get("values") or {}
+                if not any(
+                    isinstance(t, dict) and t.get("agent_name") == agent_name
+                    for t in (values.get("async_tasks") or {}).values()
+                ):
+                    try:
+                        values = await _read_state_values(graph, config)
+                    except Exception:
+                        values = {}
                 for task_id, task in (values.get("async_tasks") or {}).items():
                     if not isinstance(task, dict):
                         continue
@@ -739,12 +802,42 @@ async def invocations(payload, context: RequestContext):
                 await asyncio.sleep(1.0)
             logger.warning("No async_tasks entry appeared for %s; relay skipped", agent_name)
 
-        producer_task = asyncio.create_task(_stream_producer())
+        producer_task = asyncio.create_task(_stream_producer(user_query))
         keepalive_task = asyncio.create_task(_keepalive())
 
         producer_done = False
         relays_outlived_producer = False
         relay_deadline: float | None = None
+        # Auto-continuation: once every task launched in this invocation is
+        # terminal, run ONE follow-up Supervisor turn in this same stream so
+        # results collection + submit_pr don't depend on the user manually
+        # prompting again (the frontend's status poller never invokes the LLM).
+        continuation_done = False
+        last_statuses: dict = {}
+
+        def _all_terminal(statuses: dict) -> bool:
+            return bool(statuses) and all(
+                s in ("success", "failed", "cancelled") for s in statuses.values()
+            )
+
+        async def _post_relay_event() -> dict | None:
+            """SDK-verified terminal statuses after the relay phase ends."""
+            state_values = final_state.get("values") or {}
+            if not state_values:
+                try:
+                    state_values = await _read_state_values(graph, config)
+                except Exception as exc:
+                    logger.warning("Failed to re-read state after relays: %s", exc)
+                    state_values = {}
+            overrides: dict = {}
+            if relay_client is not None:
+                try:
+                    overrides = await _sdk_status_overrides(
+                        relay_client, state_values.get("async_tasks") or {}
+                    )
+                except Exception as exc:
+                    logger.warning("Post-relay SDK status lookup failed: %s", exc)
+            return _status_event_from_state(state_values, overrides)
 
         try:
             while True:
@@ -756,6 +849,47 @@ async def invocations(payload, context: RequestContext):
                         relay_deadline is not None
                         and asyncio.get_event_loop().time() > relay_deadline
                     ):
+                        # Relay phase over (or never started). Emit the final
+                        # SDK-verified statuses, then either auto-continue the
+                        # Supervisor once or end the stream. The sub-agent runs
+                        # have finished streaming, but the async_tasks channel
+                        # stays stale until the Supervisor next checks — hence
+                        # the SDK-verified event (and the continuation turn,
+                        # which does exactly that check).
+                        if relays_outlived_producer:
+                            event = await _post_relay_event()
+                            if event:
+                                logger.info(
+                                    "Post-relay terminal statuses: %s",
+                                    event.get("dispatch_statuses"),
+                                )
+                                last_statuses = dict(
+                                    event.get("dispatch_statuses") or {}
+                                )
+                                yield event
+                        if (
+                            not continuation_done
+                            and launched_calls
+                            and _all_terminal(last_statuses)
+                        ):
+                            continuation_done = True
+                            producer_done = False
+                            relays_outlived_producer = False
+                            relay_deadline = None
+                            final_state.clear()
+                            # Fresh turn — stale tool-call fragments from the
+                            # launch turn must not merge into (and corrupt)
+                            # the continuation turn's tool calls.
+                            partial_tool_calls.clear()
+                            logger.info(
+                                "All launched tasks terminal (%s) — starting "
+                                "auto-continuation Supervisor turn",
+                                last_statuses,
+                            )
+                            producer_task = asyncio.create_task(
+                                _stream_producer(CONTINUATION_DIRECTIVE)
+                            )
+                            continue
                         break
                     try:
                         item = await asyncio.wait_for(queue.get(), timeout=1.0)
@@ -764,20 +898,23 @@ async def invocations(payload, context: RequestContext):
                 else:
                     item = await queue.get()
                 if item is SENTINEL:
-                    # The Supervisor run has finished and its state is
-                    # checkpointed. Reconcile the persisted `async_tasks`
-                    # channel into terminal per-agent dispatch statuses so
-                    # check/cancel/list outcomes surface even though the v3
-                    # `messages` projection does not carry ToolMessages
-                    # (Req 12.3/12.4, 11.4).
-                    try:
-                        snapshot = await graph.aget_state(config)
-                        state_values = getattr(snapshot, "values", None) or {}
-                    except Exception as exc:
-                        logger.warning(
-                            "Failed to read final state for reconciliation: %s", exc
-                        )
-                        state_values = {}
+                    # The Supervisor run has finished. Reconcile the
+                    # `async_tasks` channel into terminal per-agent dispatch
+                    # statuses so check/cancel/list outcomes surface even
+                    # though the v3 `messages` projection does not carry
+                    # ToolMessages (Req 12.3/12.4, 11.4). The run's own final
+                    # values (captured by the producer) carry everything
+                    # needed — including the in-memory message history for
+                    # result summaries — so no checkpoint read is required.
+                    state_values = final_state.get("values") or {}
+                    if not state_values:
+                        try:
+                            state_values = await _read_state_values(graph, config)
+                        except Exception as exc:
+                            logger.warning(
+                                "Failed to read final state for reconciliation: %s", exc
+                            )
+                            state_values = {}
 
                     task_map = _task_agent_map(state_values.get("async_tasks") or {})
                     event = _status_event_from_state(state_values)
@@ -787,6 +924,7 @@ async def invocations(payload, context: RequestContext):
                             event.get("dispatch_statuses"),
                             task_map,
                         )
+                        last_statuses = dict(event.get("dispatch_statuses") or {})
                         yield event
 
                     producer_done = True
@@ -854,32 +992,6 @@ async def invocations(payload, context: RequestContext):
                     relay_tasks.add(asyncio.create_task(_spawn_relay_for(agent_name)))
 
                 yield dumped
-
-            # Relays outlived the Supervisor turn: the sub-agent runs have now
-            # finished streaming, so emit a final SDK-verified terminal event
-            # (the async_tasks channel itself stays stale until the Supervisor
-            # next calls check_async_task).
-            if relays_outlived_producer:
-                try:
-                    snapshot = await graph.aget_state(config)
-                    state_values = getattr(snapshot, "values", None) or {}
-                except Exception as exc:
-                    logger.warning("Failed to re-read state after relays: %s", exc)
-                    state_values = {}
-                overrides: dict = {}
-                if relay_client is not None:
-                    try:
-                        overrides = await _sdk_status_overrides(
-                            relay_client, state_values.get("async_tasks") or {}
-                        )
-                    except Exception as exc:
-                        logger.warning("Post-relay SDK status lookup failed: %s", exc)
-                event = _status_event_from_state(state_values, overrides)
-                if event:
-                    logger.info(
-                        "Post-relay terminal statuses: %s", event.get("dispatch_statuses")
-                    )
-                    yield event
         finally:
             keepalive_task.cancel()
             for t in relay_tasks:
