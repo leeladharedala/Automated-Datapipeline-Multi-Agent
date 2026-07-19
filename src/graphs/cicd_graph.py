@@ -92,8 +92,10 @@ You will receive the actionlint error output. Your job:
 
 
 
-def _run_agent(system_prompt: str, user_message: str, model, backend=None) -> str:
-    """Create a mini DeepAgent, invoke it, and return the final AI message text.
+def _run_agent(
+    system_prompt: str, user_message: str, model, backend=None
+) -> tuple[str, dict]:
+    """Create a mini DeepAgent, invoke it, and return (final AI text, VFS files).
 
     Uses ainvoke (async) for consistency with other graphs and to support
     any async-only tools that may be added in the future.
@@ -135,11 +137,12 @@ def _run_agent(system_prompt: str, user_message: str, model, backend=None) -> st
     else:
         result = asyncio.run(_ainvoke())
 
+    vfs_files = result.get("files") or {}
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
             from src.graphs._utils import _content_to_str
-            return _content_to_str(msg.content)
-    return ""
+            return _content_to_str(msg.content), vfs_files
+    return "", vfs_files
 
 
 def _parse_yaml_blocks(response: str) -> dict[str, str]:
@@ -201,9 +204,15 @@ def _generate(state: CICDState, model) -> dict[str, Any]:
         "agent.node": "generate",
         "agent.role": "code_generator",
     }):
-        response = _run_agent(_GENERATE_PROMPT, f"## Task\n{task}", model)
+        response, vfs_files = _run_agent(_GENERATE_PROMPT, f"## Task\n{task}", model)
 
     workflow_content = _parse_yaml_blocks(response)
+    # The mini-agent sometimes writes its output with the filesystem tools
+    # instead of printing fenced blocks — recover those files from its VFS.
+    from src.graphs._utils import merge_vfs_files
+    workflow_content = merge_vfs_files(
+        workflow_content, vfs_files, ("deploy.yml", "destroy.yml")
+    )
 
     emit_progress(
         "cicd-agent",
@@ -277,7 +286,7 @@ def _validate(state: CICDState, model, sandbox=None) -> dict[str, Any]:
         "agent.node": "validate",
         "agent.role": "validator",
     }):
-        response = _run_agent(_VALIDATE_PROMPT, user_msg, model, backend=sandbox)
+        response, _ = _run_agent(_VALIDATE_PROMPT, user_msg, model, backend=sandbox)
 
     # Check for explicit PASSED/FAILED keywords from the prompt.
     # Avoid matching generic "success" which can appear in failure context.
@@ -323,10 +332,14 @@ def _fix(state: CICDState, model, sandbox=None) -> dict[str, Any]:
         "agent.role": "debugger",
         "agent.attempt": attempt,
     }):
-        response = _run_agent(_FIX_PROMPT, user_msg, model, backend=sandbox)
+        response, vfs_files = _run_agent(_FIX_PROMPT, user_msg, model, backend=sandbox)
 
     # Parse corrected YAML blocks and update workflow_content in state
     fixed_content = _parse_yaml_blocks(response)
+    from src.graphs._utils import merge_vfs_files
+    fixed_content = merge_vfs_files(
+        fixed_content, vfs_files, ("deploy.yml", "destroy.yml")
+    )
     current_content = state.get("workflow_content", {})
     updated_content = {**current_content, **fixed_content}
 

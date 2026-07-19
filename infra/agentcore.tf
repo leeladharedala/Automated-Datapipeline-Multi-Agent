@@ -41,6 +41,13 @@ resource "aws_bedrockagentcore_agent_runtime" "orchestrator" {
     # Co-located subagent server (Process B) — localhost-only, no external ports
     SUBAGENT_SERVER_URL = "http://127.0.0.1:2024"
 
+    # Structured (OTLP) log destination for Process B's sub-agent logs.
+    # Process B cannot run under ADOT auto-instrumentation (its unconditional
+    # botocore patches recurse), so server_graphs hand-wires the CloudWatch
+    # OTLP log exporter against this explicitly-configured group/stream.
+    SUBAGENT_OTLP_LOG_GROUP  = aws_cloudwatch_log_group.agent_runtime.name
+    SUBAGENT_OTLP_LOG_STREAM = "otel-rt-logs"
+
 
     # Observability (ADOT)
     AGENT_OBSERVABILITY_ENABLED                        = "true"

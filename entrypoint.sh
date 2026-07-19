@@ -32,6 +32,27 @@ PY
   fi
 fi
 
+# --- Route sub-agent OTLP logs to the platform log group when discoverable ---
+# The instrumented ingress learns its log destination from
+# OTEL_EXPORTER_OTLP_LOGS_HEADERS (x-aws-log-group / x-aws-log-stream) when
+# the platform injects it. If present, reuse it for Process B's hand-wired
+# exporter so sub-agent records land in the SAME group/stream as the ingress
+# records (the platform runtime group's name embeds a random suffix Terraform
+# cannot self-reference). Otherwise the Terraform-provided
+# SUBAGENT_OTLP_LOG_GROUP (/agentcore/<project>-<env>) fallback applies.
+_PLATFORM_GROUP="$(printf '%s' "${OTEL_EXPORTER_OTLP_LOGS_HEADERS:-}" | tr ',' '\n' | sed -n 's/^x-aws-log-group=//p' | head -1)"
+_PLATFORM_STREAM="$(printf '%s' "${OTEL_EXPORTER_OTLP_LOGS_HEADERS:-}" | tr ',' '\n' | sed -n 's/^x-aws-log-stream=//p' | head -1)"
+if [ -n "$_PLATFORM_GROUP" ]; then
+  export SUBAGENT_OTLP_LOG_GROUP="$_PLATFORM_GROUP"
+  export SUBAGENT_OTLP_LOG_STREAM="${_PLATFORM_STREAM:-${SUBAGENT_OTLP_LOG_STREAM:-otel-rt-logs}}"
+  echo "Sub-agent OTLP logs → platform group ${SUBAGENT_OTLP_LOG_GROUP} (${SUBAGENT_OTLP_LOG_STREAM})"
+else
+  echo "Sub-agent OTLP logs → ${SUBAGENT_OTLP_LOG_GROUP:-<none configured>} (${SUBAGENT_OTLP_LOG_STREAM:-otel-rt-logs})"
+fi
+# Boot diagnostic (names only, no values): which observability env keys the
+# platform actually injects into the container.
+echo "Observability env keys: $(env | grep -E '^(OTEL_|AGENT_|AWS_BEDROCK|BEDROCK_)' | cut -d= -f1 | sort | tr '\n' ' ')"
+
 # --- Process B: co-located LangGraph API server (localhost only) ---
 # Worker pool sized N+1 (N=3 sub-agents => >=4 concurrent slots) so a full
 # fan-out never queues (Req 2.5 / 2.6 / 9.1).
@@ -43,7 +64,7 @@ fi
 # not usable here since AgentCore containers cannot run Docker). --no-reload
 # disables the file watcher so the server is never restarted (and its state
 # wiped) mid-run.
-# Deliberately NOT instrumented. Auto-instrumentation of this process is
+# NOT instrumented by default. Auto-instrumentation of this process is
 # incompatible with the ADOT distro: even with
 # OTEL_PYTHON_DISABLED_INSTRUMENTATIONS covering botocore/requests/urllib3,
 # the aws_configurator applies its own botocore patches unconditionally, so
@@ -51,14 +72,25 @@ fi
 # time) dies with "maximum recursion depth exceeded"; the langchain
 # instrumentation additionally mutated replayed messages into thinking-block
 # 400s. Verified empirically on 2026-07-19 across three configurations.
-# Sub-agent logs reach CloudWatch via stdout ([runtime-logs] streams) and
-# reach the dashboard via the run-stream relays; span-level telemetry for
-# this process would need a hand-configured OTel SDK (no auto patches).
-langgraph dev \
-  --host 127.0.0.1 --port 2024 \
-  --n-jobs-per-worker 4 \
-  --no-reload \
-  --no-browser &
+# Structured logs reach CloudWatch via the hand-wired OTLP exporter in
+# server_graphs (plus stdout); the dashboard gets progress via the
+# run-stream relays. Set SUBAGENT_INSTRUMENT=true (Terraform env) to wrap
+# this process in opentelemetry-instrument anyway — expect the failures
+# above until ADOT stops unconditional botocore patching.
+if [ "${SUBAGENT_INSTRUMENT:-false}" = "true" ]; then
+  echo "SUBAGENT_INSTRUMENT=true — wrapping langgraph dev in opentelemetry-instrument"
+  opentelemetry-instrument langgraph dev \
+    --host 127.0.0.1 --port 2024 \
+    --n-jobs-per-worker 4 \
+    --no-reload \
+    --no-browser &
+else
+  langgraph dev \
+    --host 127.0.0.1 --port 2024 \
+    --n-jobs-per-worker 4 \
+    --no-reload \
+    --no-browser &
+fi
 LG_PID=$!
 
 # --- Wait for readiness before ingress accepts work (Req 3.5/3.6) ---

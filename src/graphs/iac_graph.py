@@ -127,8 +127,8 @@ You will receive the validation error output. Your job:
 
 
 def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend=None,
-               _bg_loop_cache: dict | None = None) -> str:
-    """Create a mini DeepAgent, invoke it, and return the final AI message text.
+               _bg_loop_cache: dict | None = None) -> tuple[str, dict]:
+    """Create a mini DeepAgent, invoke it, and return (final AI text, VFS files).
 
     This gives the agent access to the full DeepAgent tool stack:
     write_file, edit_file, read_file, execute, ls, glob, grep.
@@ -167,12 +167,13 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
     else:
         result = asyncio.run(_ainvoke())
 
-    # Extract the last AI message
+    # Extract the last AI message (plus the mini-agent's VFS output files)
+    vfs_files = result.get("files") or {}
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
             from src.graphs._utils import _content_to_str
-            return _content_to_str(msg.content)
-    return ""
+            return _content_to_str(msg.content), vfs_files
+    return "", vfs_files
 
 
 def _research(state: IaCState, model, tools_cache: dict) -> dict[str, Any]:
@@ -241,7 +242,7 @@ def _research(state: IaCState, model, tools_cache: dict) -> dict[str, Any]:
         "agent.role": "researcher",
         "agent.tool_count": len(active_tools),
     }):
-        response = _run_agent(
+        response, _ = _run_agent(
             _RESEARCH_PROMPT,
             f"## Task\n{task}\n\nResearch the AWS resources and Terraform configuration needed for this task.",
             model,
@@ -315,9 +316,16 @@ def _generate(state: IaCState, model, _bg_loop_cache: dict | None = None) -> dic
         "agent.role": "code_generator",
         "agent.research_context_length": len(research),
     }):
-        response = _run_agent(_GENERATE_PROMPT, user_msg, model, _bg_loop_cache=_bg_loop_cache)
+        response, vfs_files = _run_agent(_GENERATE_PROMPT, user_msg, model, _bg_loop_cache=_bg_loop_cache)
 
     tf_content = _parse_hcl_blocks(response)
+    # The mini-agent sometimes writes its output with the filesystem tools
+    # instead of printing fenced blocks — recover those files from its VFS.
+    from src.graphs._utils import merge_vfs_files
+    tf_content = merge_vfs_files(
+        tf_content, vfs_files,
+        ("provider.tf", "variables.tf", "main.tf", "outputs.tf", "iam.tf"),
+    )
     emit_progress(
         "iac-agent",
         f"[generate] Generated {len(tf_content)} file(s): "
@@ -401,8 +409,8 @@ def _validate(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None 
         "agent.node": "validate",
         "agent.role": "validator",
     }):
-        response = _run_agent(_VALIDATE_PROMPT, user_msg, model, backend=sandbox,
-                              _bg_loop_cache=_bg_loop_cache)
+        response, _ = _run_agent(_VALIDATE_PROMPT, user_msg, model, backend=sandbox,
+                                 _bg_loop_cache=_bg_loop_cache)
 
     # Check for explicit PASSED/FAILED keywords from the prompt.
     # Avoid matching generic "success" which can appear in failure context.
@@ -452,11 +460,16 @@ def _fix(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None = Non
         "agent.role": "debugger",
         "agent.attempt": attempt,
     }):
-        response = _run_agent(_FIX_PROMPT, user_msg, model, backend=sandbox,
-                              _bg_loop_cache=_bg_loop_cache)
+        response, vfs_files = _run_agent(_FIX_PROMPT, user_msg, model, backend=sandbox,
+                                         _bg_loop_cache=_bg_loop_cache)
 
     # Parse corrected HCL blocks and update tf_content in state
     fixed_content = _parse_hcl_blocks(response)
+    from src.graphs._utils import merge_vfs_files
+    fixed_content = merge_vfs_files(
+        fixed_content, vfs_files,
+        ("provider.tf", "variables.tf", "main.tf", "outputs.tf", "iam.tf"),
+    )
     current_content = state.get("tf_content", {})
     updated_content = {**current_content, **fixed_content}
 

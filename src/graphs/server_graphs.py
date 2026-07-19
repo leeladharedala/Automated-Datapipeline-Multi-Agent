@@ -56,12 +56,26 @@ def _setup_otlp_log_export() -> None:
     logs keep flowing to stdout only.
     """
     try:
-        endpoint = os.environ.get("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
-        headers_env = os.environ.get("OTEL_EXPORTER_OTLP_LOGS_HEADERS", "")
-        pairs = dict(p.split("=", 1) for p in headers_env.split(",") if "=" in p)
-        log_group = pairs.get("x-aws-log-group")
-        log_stream = pairs.get("x-aws-log-stream")
+        region = os.environ.get("AWS_REGION", "us-west-2")
+        # Preferred: explicit configuration passed by our own Terraform
+        # (SUBAGENT_OTLP_LOG_GROUP / _STREAM). Fallback: the standard OTLP
+        # env pair, when the platform provides it.
+        log_group = os.environ.get("SUBAGENT_OTLP_LOG_GROUP", "")
+        log_stream = os.environ.get("SUBAGENT_OTLP_LOG_STREAM", "otel-rt-logs")
+        endpoint = os.environ.get(
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+            f"https://logs.{region}.amazonaws.com/v1/logs",
+        )
+        if not log_group:
+            headers_env = os.environ.get("OTEL_EXPORTER_OTLP_LOGS_HEADERS", "")
+            pairs = dict(p.split("=", 1) for p in headers_env.split(",") if "=" in p)
+            log_group = pairs.get("x-aws-log-group") or ""
+            log_stream = pairs.get("x-aws-log-stream") or log_stream
         if not (endpoint and log_group and log_stream):
+            logging.getLogger(__name__).warning(
+                "Sub-agent OTLP log export disabled: no log group configured "
+                "(set SUBAGENT_OTLP_LOG_GROUP)"
+            )
             return
 
         from botocore.session import Session
