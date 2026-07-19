@@ -43,13 +43,14 @@ fi
 # not usable here since AgentCore containers cannot run Docker). --no-reload
 # disables the file watcher so the server is never restarted (and its state
 # wiped) mid-run.
-# Instrument Process B too — sub-agent LLM/tool activity otherwise produces
-# no OTel spans in CloudWatch GenAI observability (only the ingress was
-# wrapped before, and all sub-agent work moved into this process). A distinct
-# service.name keeps sub-agent traces distinguishable from the ingress.
-_SUBAGENT_SERVICE="$(printf '%s' "${OTEL_RESOURCE_ATTRIBUTES:-}" | sed -n 's/.*service\.name=\([^,]*\).*/\1/p')"
-OTEL_SERVICE_NAME="${_SUBAGENT_SERVICE:-multi-agent-pipeline}-subagents" \
-opentelemetry-instrument langgraph dev \
+# Deliberately NOT wrapped in opentelemetry-instrument: auto-instrumenting
+# this process breaks every boto3/requests call in it with "maximum recursion
+# depth exceeded" (Secrets Manager at import, S3 data sampling at run time,
+# and the AWS OTLP log exporter recursing through its own instrumented
+# requests+SigV4 signing). Sub-agent progress reaches CloudWatch via stdout
+# and reaches the dashboard via the run-stream relays; span-level tracing for
+# this process needs a targeted setup, not blanket auto-instrumentation.
+langgraph dev \
   --host 127.0.0.1 --port 2024 \
   --n-jobs-per-worker 4 \
   --no-reload \

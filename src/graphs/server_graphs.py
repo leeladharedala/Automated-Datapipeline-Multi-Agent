@@ -73,7 +73,12 @@ def _resolve_anthropic_key() -> None:
 _resolve_anthropic_key()
 
 # One shared model for every sub-agent graph on the co-located server.
-_model = ChatAnthropic(model=_MODEL_NAME)
+# thinking is explicitly disabled: claude-sonnet-5 emits (sometimes empty)
+# thinking blocks by default, and replaying an empty thinking block on the
+# next tool-loop turn 400s with "thinking.thinking: Field required" —
+# which killed every sub-agent run mid-loop. Sub-agents don't surface
+# reasoning anywhere, so nothing is lost by turning it off.
+_model = ChatAnthropic(model=_MODEL_NAME, thinking={"type": "disabled"})
 
 # Module-level compiled graph handles referenced by langgraph.json.
 # graph_id values ("iac" / "cicd" / "data-eng") match the AsyncSubAgent specs.

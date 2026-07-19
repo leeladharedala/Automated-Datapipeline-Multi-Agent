@@ -43,8 +43,14 @@ async def build_agent():
     if not MEMORY_ID:
         raise RuntimeError("AGENTCORE_MEMORY_ID environment variable is required")
 
+    # thinking is explicitly disabled: claude-sonnet-5 emits (sometimes empty)
+    # thinking blocks by default, and replaying an empty thinking block on a
+    # later turn 400s with "thinking.thinking: Field required" (observed
+    # killing sub-agent runs; the Supervisor replays its checkpointed history
+    # every turn, so it carries the same latent risk).
     model = ChatAnthropic(
         model="claude-sonnet-5",
+        thinking={"type": "disabled"},
     )
 
     # Async sub-agent specs. A spec containing `graph_id` triggers deepagents to
