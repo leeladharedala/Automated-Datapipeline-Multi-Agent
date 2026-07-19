@@ -14,7 +14,7 @@ sub-agent graphs are compiled for the co-located server (Req 2.3).
 import logging
 import os
 
-from langchain_anthropic import ChatAnthropic
+from src.anthropic_model import SanitizedChatAnthropic
 
 from src.graphs import (
     build_iac_graph,
@@ -75,11 +75,10 @@ _resolve_anthropic_key()
 # One shared model for every sub-agent graph on the co-located server.
 # Thinking stays ON (model default): disabling it measurably degraded
 # generation quality (iac burned all 3 fix attempts on runs that used to pass
-# first try). The "thinking.thinking: Field required" 400 seen on 2026-07-18
-# was caused by the langchain auto-instrumentation mutating replayed messages
-# when this process ran under opentelemetry-instrument — that instrumentation
-# is excluded in entrypoint.sh, which is the actual fix.
-_model = ChatAnthropic(model=_MODEL_NAME)
+# first try). SanitizedChatAnthropic strips the empty thinking blocks that
+# otherwise 400 on replay ("thinking.thinking: Field required") — see
+# src/anthropic_model.py.
+_model = SanitizedChatAnthropic(model=_MODEL_NAME)
 
 # Module-level compiled graph handles referenced by langgraph.json.
 # graph_id values ("iac" / "cicd" / "data-eng") match the AsyncSubAgent specs.

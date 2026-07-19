@@ -16,8 +16,8 @@ import os
 
 from deepagents import create_deep_agent
 from deepagents.middleware.async_subagents import AsyncSubAgent  # preview API (0.6.x)
-from langchain_anthropic import ChatAnthropic
 
+from src.anthropic_model import SanitizedChatAnthropic
 from src.checkpointer import FastAgentCoreMemorySaver
 from src.prompts.orchestrator_prompt import ORCHESTRATOR_PROMPT
 from src.graphs import OrchestratorMiddleware
@@ -43,12 +43,11 @@ async def build_agent():
     if not MEMORY_ID:
         raise RuntimeError("AGENTCORE_MEMORY_ID environment variable is required")
 
-    # Thinking stays ON (model default) — matches the proven July-17 setup.
-    # The empty-thinking-block replay 400 observed on 2026-07-18 traced to the
-    # langchain auto-instrumentation mutating messages in the (then-)
-    # instrumented co-located server, not to thinking itself; this process has
-    # replayed thinking blocks under instrumentation without issue since May.
-    model = ChatAnthropic(
+    # Thinking stays ON (model default). SanitizedChatAnthropic strips the
+    # empty thinking blocks claude-sonnet-5 sometimes emits, which otherwise
+    # 400 when the checkpointed history is replayed on a later turn
+    # ("thinking.thinking: Field required") — see src/anthropic_model.py.
+    model = SanitizedChatAnthropic(
         model="claude-sonnet-5",
     )
 
