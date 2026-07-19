@@ -1,6 +1,37 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# --- Resolve ANTHROPIC_API_KEY BEFORE starting either process ---
+# Must happen here, uninstrumented: fetching the secret inside the
+# opentelemetry-instrument'ed langgraph server fails with "maximum recursion
+# depth exceeded" (auto-instrumentation recursing through boto3 at graph
+# import time), which left the sub-agent ChatAnthropic with no key and every
+# run dying at its first LLM call. Exporting the key here lets the in-process
+# resolvers (server_graphs._resolve_anthropic_key, server._resolve_secrets)
+# short-circuit without ever touching Secrets Manager under instrumentation.
+if [ -n "${ANTHROPIC_API_KEY_SECRET_ARN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+  for attempt in 1 2 3; do
+    _KEY="$(python - <<'PY' 2>/dev/null || true
+import os, boto3
+arn = os.environ["ANTHROPIC_API_KEY_SECRET_ARN"]
+region = os.environ.get("AWS_REGION", "us-west-2")
+print(boto3.client("secretsmanager", region_name=region).get_secret_value(SecretId=arn)["SecretString"], end="")
+PY
+)"
+    if [ -n "$_KEY" ]; then
+      export ANTHROPIC_API_KEY="$_KEY"
+      echo "Resolved ANTHROPIC_API_KEY in entrypoint (attempt $attempt)"
+      break
+    fi
+    echo "ANTHROPIC_API_KEY resolution attempt $attempt failed; retrying" >&2
+    sleep 2
+  done
+  if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+    echo "FATAL: could not resolve ANTHROPIC_API_KEY from Secrets Manager" >&2
+    exit 1
+  fi
+fi
+
 # --- Process B: co-located LangGraph API server (localhost only) ---
 # Worker pool sized N+1 (N=3 sub-agents => >=4 concurrent slots) so a full
 # fan-out never queues (Req 2.5 / 2.6 / 9.1).

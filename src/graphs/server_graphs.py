@@ -11,6 +11,7 @@ checkpointer/store (Req 13.3, 13.4). This is the single place where the
 sub-agent graphs are compiled for the co-located server (Req 2.3).
 """
 
+import logging
 import os
 
 from langchain_anthropic import ChatAnthropic
@@ -20,6 +21,24 @@ from src.graphs import (
     build_cicd_graph,
     build_data_eng_graph,
 )
+
+
+class _SuppressOtelDetachNoise(logging.Filter):
+    """Drop the benign "Failed to detach context" ValueError.
+
+    Now that this process runs under opentelemetry-instrument, the langchain
+    auto-instrumentation wrapping ``Pregel.astream`` conflicts with the
+    graphs' background-loop ``run_coroutine_threadsafe`` pattern: the OTel
+    context token is reset from a different contextvars Context, producing a
+    full-stack ERROR log per run. Same suppression as the ingress
+    (src/agentcore/server.py) so ERROR-level logs stay meaningful.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "Failed to detach context" not in record.getMessage()
+
+
+logging.getLogger("opentelemetry.context").addFilter(_SuppressOtelDetachNoise())
 
 # Env-driven model defaults, consistent with src/main.py's Supervisor build.
 _MODEL_NAME = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
