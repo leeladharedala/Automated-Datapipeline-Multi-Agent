@@ -26,7 +26,7 @@ def emit_progress(agent_name: str, message: str) -> None:
 
 
 def resolve_with_heartbeat(
-    future, agent_name: str, phase: str, interval: float = 6.0
+    future, agent_name: str, phase: str, interval: float = 15.0
 ):
     """Block on a concurrent.futures Future, emitting a heartbeat every
     ``interval`` seconds while it is still pending.
@@ -54,7 +54,7 @@ def resolve_with_heartbeat(
             try:
                 emit_progress(
                     agent_name,
-                    f"[{phase}] still working… ({int(elapsed)}s elapsed)",
+                    f"[{phase}] still working ({int(elapsed)}s)",
                 )
             except Exception:
                 pass  # heartbeat is advisory; never let it break the node
