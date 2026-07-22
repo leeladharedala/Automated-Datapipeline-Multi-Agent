@@ -537,20 +537,17 @@ async def stream_run_relay(client, task: dict, queue: asyncio.Queue) -> None:
             if text:
                 _put(text)
 
-    # Most → least capable. A TypeError means the installed SDK doesn't accept
-    # one of the kwargs — downgrade to the next shape. Any other error means
-    # the stream itself failed (e.g. run already gone) — also try the next
-    # shape, since join_stream can attach where threads.stream cannot.
+    # Resumable join_stream FIRST: the sub-agent runs are created with
+    # stream_resumable=True (see _patch_subagent_run_stream_modes), so a
+    # resumable join replays the run's buffered events FROM THE START — this is
+    # what lets the relay show early nodes (e.g. data-eng `sample_data`) that
+    # finish before the relay finishes attaching. `threads.stream` only streams
+    # live-from-attach, so a relay that lands mid-run (during the long
+    # `generate`) would otherwise miss `sample` entirely and show only
+    # `generate`. Order is otherwise most → least capable; a TypeError means the
+    # installed SDK doesn't accept a kwarg — downgrade to the next shape. Any
+    # other error means that stream shape failed — also try the next.
     attempts = (
-        (
-            "threads.stream",
-            lambda: client.threads.stream(
-                thread_id=thread_id,
-                run_id=run_id,
-                stream_mode=list(STREAM_RELAY_MODES),
-                on_disconnect="continue",
-            ),
-        ),
         (
             "runs.join_stream(resumable)",
             lambda: client.runs.join_stream(
@@ -559,6 +556,15 @@ async def stream_run_relay(client, task: dict, queue: asyncio.Queue) -> None:
                 stream_mode=list(STREAM_RELAY_MODES),
                 cancel_on_disconnect=False,
                 stream_resumable=True,
+            ),
+        ),
+        (
+            "threads.stream",
+            lambda: client.threads.stream(
+                thread_id=thread_id,
+                run_id=run_id,
+                stream_mode=list(STREAM_RELAY_MODES),
+                on_disconnect="continue",
             ),
         ),
         (
