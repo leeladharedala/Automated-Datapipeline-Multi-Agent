@@ -12,9 +12,10 @@ from datetime import datetime
 from langchain_core.tools import tool
 from github import Github, GithubException
 
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-GITHUB_REPO = os.environ.get("GITHUB_REPO", "")  # e.g. "org/repo-name"
-BASE_BRANCH = os.environ.get("GITHUB_BASE_BRANCH", "main")
+# NOTE: GitHub config is resolved at CALL time inside submit_pr (not captured
+# at import), so a token rotated in the runtime env / Secrets Manager takes
+# effect without a process restart. The base branch defaults to the repo's
+# actual default_branch to avoid a 'main' vs 'master' mismatch.
 
 
 @tool
@@ -34,16 +35,23 @@ def submit_pr(
     Returns:
         The URL of the created Pull Request, or an error message.
     """
-    if not GITHUB_TOKEN:
+    token = os.environ.get("GITHUB_TOKEN", "")
+    repo_name = os.environ.get("GITHUB_REPO", "")
+    if not token:
         return "Error: GITHUB_TOKEN environment variable not set."
-    if not GITHUB_REPO:
+    if not repo_name:
         return "Error: GITHUB_REPO environment variable not set."
     if not files:
         return "Error: No files provided to commit."
 
     try:
-        gh = Github(GITHUB_TOKEN)
-        repo = gh.get_repo(GITHUB_REPO)
+        gh = Github(token)
+        repo = gh.get_repo(repo_name)
+
+        # Base branch: honor GITHUB_BASE_BRANCH when explicitly set, otherwise
+        # use the repo's actual default branch (avoids a 'main' vs 'master'
+        # 404 when get_branch/create_pull assume the wrong name).
+        base_branch = os.environ.get("GITHUB_BASE_BRANCH") or repo.default_branch
 
         # Create a unique branch name
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -51,7 +59,7 @@ def submit_pr(
         branch_name = f"pipeline/{timestamp}-{short_id}"
 
         # Get the base branch SHA
-        base_ref = repo.get_branch(BASE_BRANCH)
+        base_ref = repo.get_branch(base_branch)
         base_sha = base_ref.commit.sha
 
         # Create the new branch
@@ -86,7 +94,7 @@ def submit_pr(
             title=title,
             body=description,
             head=branch_name,
-            base=BASE_BRANCH,
+            base=base_branch,
         )
 
         return pr.html_url
