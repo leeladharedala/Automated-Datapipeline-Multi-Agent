@@ -83,6 +83,16 @@ Rules:
   - For CloudWatch Log Groups, set explicit `retention_in_days` to avoid orphaned resources.
   - For IAM roles/policies, ensure inline policies are used or `force_detach_policies = true`.
   - Never create resources with manual deletion requirements (e.g., non-empty ECR repos without `force_delete = true`).
+- NO PLAN-TIME LOCAL FILE DEPENDENCIES: the PySpark/Glue script is produced by a
+  SEPARATE agent and is NOT present in this sandbox at `terraform plan` time.
+  - Never call any `file*()` function on a local path — `filemd5()`,
+    `filebase64sha256()`, `file()`, `filebase64()` — these are evaluated at plan
+    time and will hard-fail because the referenced file does not exist.
+  - Never set `source = "<local path>"` (e.g. `${path.module}/scripts/...`) on an
+    `aws_s3_object`. Do not upload the script via Terraform at all.
+  - Model the Glue job's `command.script_location` (and any code reference) as an
+    S3 URI, e.g. `"s3://${aws_s3_bucket.<bucket>.id}/${var.scripts_prefix}transform.py"`.
+    Assume the script object is uploaded out-of-band by the CI/CD pipeline, not by Terraform.
 - Respond with ALL four fenced code blocks above, nothing else before or after.
 """
 
@@ -122,6 +132,14 @@ You will receive the validation error output. Your job:
 2. Analyze the error and identify the root cause
 3. Fix ONLY the broken file(s) using edit_file — do not regenerate everything
 4. Respond with a summary of what you fixed and why
+
+Constraint: the PySpark/Glue script is produced by a SEPARATE agent and is NOT
+present in this sandbox. If the error is a missing local file (e.g. a `filemd5()`
+or `source = "${path.module}/scripts/..."` reference on an `aws_s3_object`), the
+fix is to REMOVE that plan-time local-file dependency — do not try to create the
+script. Delete the script-upload `aws_s3_object` resource and point the Glue job's
+`script_location` at an S3 URI instead (the CI/CD pipeline uploads the script).
+Never introduce any `file*()` call on a local path.
 """
 
 
