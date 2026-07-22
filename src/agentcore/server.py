@@ -7,6 +7,7 @@ Uses BedrockAgentCoreApp with async streaming entrypoint.
 import asyncio
 import logging
 import os
+import re
 import sys
 
 # Guarantee project root is in sys.path for absolute imports
@@ -178,7 +179,9 @@ def _reconcile_state_values(state_values: dict) -> tuple[dict, dict]:
 
 
 def _status_event_from_state(
-    state_values: dict, status_overrides: dict | None = None
+    state_values: dict,
+    status_overrides: dict | None = None,
+    extra_summaries: dict | None = None,
 ) -> dict | None:
     """Build a complete ``__pipeline_status__`` event from persisted state.
 
@@ -200,6 +203,8 @@ def _status_event_from_state(
         async_tasks[task_id] = task
 
     summaries = _extract_result_summaries(values.get("messages") or [])
+    if extra_summaries:
+        summaries = {**summaries, **extra_summaries}
     dispatch_statuses, accumulated_results = reconcile(async_tasks, summaries)
     if not dispatch_statuses:
         return None
@@ -277,6 +282,93 @@ async def _sdk_status_overrides(client, async_tasks: dict) -> dict:
         if isinstance(raw, str) and raw:
             overrides[str(task_id)] = raw
     return overrides
+
+
+# Max characters of a sub-agent report surfaced in a Task's detail view. Larger
+# than RESULT_SUMMARY_LIMIT because this feeds the expandable "View detail"
+# panel, not the one-line dashboard summary.
+DETAIL_SUMMARY_LIMIT = 4000
+
+# The machine-readable file payload appended to every sub-agent report. It is
+# consumed by the Supervisor's submit_pr merge, not by humans — strip it from
+# the detail view.
+_PR_FILES_JSON_RE = re.compile(r"<!--\s*PR_FILES_JSON.*?-->", re.DOTALL)
+
+# thread_id → report text. A terminal run's final report is immutable, so cache
+# it to keep status polls from re-fetching full thread state every few seconds.
+_RESULT_SUMMARY_CACHE: dict[str, str] = {}
+
+
+def _content_text(content) -> str | None:
+    """Flatten a message's content (plain string or block list) to text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            block.get("text")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        joined = "\n".join(p for p in parts if isinstance(p, str))
+        return joined or None
+    return None
+
+
+async def _sdk_result_summaries(
+    client, async_tasks: dict, status_overrides: dict | None = None
+) -> dict:
+    """Fetch each successful task's final report from the co-located server.
+
+    The checkpoint read (``_read_state_values``) deliberately skips rebuilding
+    the ``messages`` DeltaChannel, so ``extract_result_summaries`` finds
+    nothing there and Task detail views render empty. The report still exists
+    as the sub-agent thread's last AI message on the co-located server; fetch
+    it via ``threads.get_state`` for terminal-success tasks only, strip the
+    PR_FILES_JSON payload, and cache per thread (reports are immutable once
+    the run is terminal). Best-effort: an unreachable thread is omitted.
+    """
+    summaries: dict = {}
+    for task_id, task in (async_tasks or {}).items():
+        if not isinstance(task, dict):
+            continue
+        tid = str(task_id)
+        status = (status_overrides or {}).get(tid, task.get("status"))
+        if derive_dispatch_status(status) != "success":
+            continue
+        cached = _RESULT_SUMMARY_CACHE.get(tid)
+        if cached is not None:
+            summaries[tid] = cached
+            continue
+        thread_id = task.get("thread_id") or tid
+        try:
+            state = await client.threads.get_state(thread_id)
+        except Exception:
+            continue
+        values = (
+            state.get("values")
+            if isinstance(state, dict)
+            else getattr(state, "values", None)
+        )
+        text: str | None = None
+        for msg in reversed((values or {}).get("messages") or []):
+            mtype = (
+                msg.get("type") if isinstance(msg, dict) else getattr(msg, "type", None)
+            )
+            if mtype != "ai":
+                continue
+            text = _content_text(
+                msg.get("content")
+                if isinstance(msg, dict)
+                else getattr(msg, "content", None)
+            )
+            if text:
+                break
+        if not text:
+            continue
+        text = _PR_FILES_JSON_RE.sub("", text).strip()[:DETAIL_SUMMARY_LIMIT]
+        _RESULT_SUMMARY_CACHE[tid] = text
+        summaries[tid] = text
+    return summaries
 
 
 # ---------------------------------------------------------------------------
@@ -558,14 +650,18 @@ async def invocations(payload, context: RequestContext):
             config = {"configurable": {"thread_id": session_id, "actor_id": session_id}}
             state_values = await _read_state_values(graph, config)
             overrides: dict = {}
+            sdk_summaries: dict = {}
             try:
                 client = _get_subagent_client()
                 overrides = await _sdk_status_overrides(
                     client, state_values.get("async_tasks") or {}
                 )
+                sdk_summaries = await _sdk_result_summaries(
+                    client, state_values.get("async_tasks") or {}, overrides
+                )
             except Exception as exc:
                 logger.warning("Status mode: SDK status lookup failed: %s", exc)
-            event = _status_event_from_state(state_values, overrides)
+            event = _status_event_from_state(state_values, overrides, sdk_summaries)
             yield event or {"__pipeline_status__": True, "dispatch_statuses": {}}
         except Exception as exc:
             logger.exception("Status mode failed")
@@ -752,8 +848,11 @@ async def invocations(payload, context: RequestContext):
         # self-healing fix loops (3 terraform-plan attempts) can exceed 20
         # minutes, so default generously; keepalives hold the connection.
         RELAY_MAX_WAIT = float(os.environ.get("SUBAGENT_RELAY_MAX_WAIT_SECONDS", "1500"))
-        # Cadence of SDK-verified runs.get status polls while holding.
-        STATUS_POLL_INTERVAL = 20.0
+        # Cadence of SDK-verified runs.get status polls while holding. Kept
+        # tight (5s) so a sub-agent flipping running→success surfaces on the
+        # dashboard within a few seconds rather than up to a poll-interval late;
+        # runs.get is a lightweight status read.
+        STATUS_POLL_INTERVAL = 5.0
         last_status_poll = 0.0
         # Per-TASK terminality from the latest status event (see
         # _event_tasks_terminal) — the continuation gate and the stream-hold
@@ -861,14 +960,18 @@ async def invocations(payload, context: RequestContext):
                     logger.warning("Failed to re-read state after relays: %s", exc)
                     state_values = {}
             overrides: dict = {}
+            sdk_summaries: dict = {}
             if relay_client is not None:
                 try:
                     overrides = await _sdk_status_overrides(
                         relay_client, state_values.get("async_tasks") or {}
                     )
+                    sdk_summaries = await _sdk_result_summaries(
+                        relay_client, state_values.get("async_tasks") or {}, overrides
+                    )
                 except Exception as exc:
                     logger.warning("Post-relay SDK status lookup failed: %s", exc)
-            return _status_event_from_state(state_values, overrides)
+            return _status_event_from_state(state_values, overrides, sdk_summaries)
 
         try:
             while True:
