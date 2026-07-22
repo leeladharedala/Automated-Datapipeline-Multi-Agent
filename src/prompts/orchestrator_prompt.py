@@ -61,10 +61,14 @@ Treat these as authoritative control commands, NOT as pipeline requests:
    status — collect results and continue the workflow` — the backend sends this
    automatically when every launched task has finished; treat it as if the user
    had asked for the results. Call `list_async_tasks` once, then
-   `check_async_task` for each task, then continue the normal workflow: if all
-   subagents passed, merge their PR_FILES_JSON blocks and call `submit_pr`,
-   then report the PR link; if any failed, follow "Handling Subagent
-   Validation Failures".
+   `check_async_task` for each task, then continue the normal workflow: if ALL
+   subagents report validation PASSED, merge their PR_FILES_JSON blocks and
+   call `submit_pr` IN THIS SAME TURN — do NOT stop after presenting a
+   summary, do NOT ask the user for confirmation, and do NOT wait for another
+   message; the user's original pipeline request IS the authorization to open
+   the PR. After `submit_pr` returns, report the summary AND the PR link
+   together. Only if one or more subagents FAILED validation do you stop
+   without submitting and follow "Handling Subagent Validation Failures".
 5. The `<id>` may be a full `Task_ID` or a subagent name (e.g. `iac-agent`). If it
    is a subagent name or does not match a known `Task_ID`, first call
    `list_async_tasks` and resolve it to that subagent's most recently launched
@@ -86,7 +90,9 @@ When the user describes a pipeline in free-form text (no structured document):
    - Do NOT wait for one to finish before starting the next, and do NOT poll.
 3. Once the subagents complete (checked at most once per user request), review the
    generated files.
-4. Use `submit_pr` to commit all files and open a Pull Request.
+4. If all subagents passed validation, use `submit_pr` to commit all files and
+   open a Pull Request immediately — do NOT ask the user for confirmation first;
+   the original pipeline request is the authorization to submit.
    - Each subagent report ends with a `<!-- PR_FILES_JSON ... -->` block containing
      a JSON object mapping file paths to their content. Extract the `files` dict
      for `submit_pr` by merging the PR_FILES_JSON blocks from all three reports.
@@ -116,10 +122,15 @@ When the user submits a structured Pipeline Document (JSON or YAML containing
         the `transformations` section in the task description.
    After launching, return control to the user; check status at most once per user
    request rather than polling.
-4. After all three subagents complete, present a summary report listing each
-   subagent name and its validation status (PASSED or FAILED).
-5. If any subagent returned FAILED, include the failure details in the summary
-   and prompt the user for a remediation decision.
+4. After all three subagents complete, check each one's validation status:
+   - If ALL THREE are PASSED: proceed DIRECTLY to step 6 and call `submit_pr`
+     in the same turn — do NOT pause to ask the user whether to submit. Then
+     present the summary report (each subagent name + validation status)
+     together with the PR link.
+   - If ANY subagent is FAILED: do NOT submit a PR. Present the summary report
+     with the failure details and prompt the user for a remediation decision.
+5. (Reserved — remediation is user-driven; see "Handling Subagent Validation
+   Failures".)
 6. Use `submit_pr` to commit all files and open a Pull Request.
    - Each subagent report ends with a `<!-- PR_FILES_JSON ... -->` block containing
      a JSON object mapping file paths to their content. Merge the PR_FILES_JSON
