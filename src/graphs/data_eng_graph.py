@@ -92,7 +92,8 @@ Common issues: missing main() entry point, syntax errors, missing pyspark import
 """
 
 
-def _invoke_agent(agent, user_message: str, thread_id: str | None = None) -> str:
+def _invoke_agent(agent, user_message: str, thread_id: str | None = None,
+                  heartbeat: tuple[str, str] | None = None) -> str:
     """Invoke a pre-built agent and return the final AI message text.
 
     Schedules work on the sandbox background loop via run_coroutine_threadsafe
@@ -144,7 +145,12 @@ def _invoke_agent(agent, user_message: str, thread_id: str | None = None) -> str
         _code_interpreter_cache["loop"] = _bg_loop
 
     bg_loop = _code_interpreter_cache["loop"]
-    result = asyncio.run_coroutine_threadsafe(_ainvoke(), bg_loop).result()
+    fut = asyncio.run_coroutine_threadsafe(_ainvoke(), bg_loop)
+    if heartbeat is not None:
+        from src.graphs.progress import resolve_with_heartbeat
+        result = resolve_with_heartbeat(fut, heartbeat[0], heartbeat[1])
+    else:
+        result = fut.result()
 
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and msg.content:
@@ -391,7 +397,7 @@ def _generate(state: DataEngState, agent, tool_count: int = 0) -> dict[str, Any]
     }):
         # Generate uses only browser tools — no Code Interpreter needed.
         # The code is returned as text and stored in state for the validate node.
-        response = _invoke_agent(agent, user_msg)
+        response = _invoke_agent(agent, user_msg, heartbeat=("data-eng-agent", "generate"))
 
     code_content = _parse_code_blocks(response)
     emit_progress(

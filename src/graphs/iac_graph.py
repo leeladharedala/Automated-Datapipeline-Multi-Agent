@@ -152,7 +152,8 @@ Never introduce any `file*()` call on a local path.
 
 
 def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend=None,
-               _bg_loop_cache: dict | None = None) -> tuple[str, dict]:
+               _bg_loop_cache: dict | None = None,
+               heartbeat: tuple[str, str] | None = None) -> tuple[str, dict]:
     """Create a mini DeepAgent, invoke it, and return (final AI text, VFS files).
 
     This gives the agent access to the full DeepAgent tool stack:
@@ -188,7 +189,12 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
     # is never closed between calls (avoids httpx TLS cleanup errors).
     bg_loop = (_bg_loop_cache or {}).get("loop")
     if bg_loop is not None and bg_loop.is_running():
-        result = asyncio.run_coroutine_threadsafe(_ainvoke(), bg_loop).result()
+        fut = asyncio.run_coroutine_threadsafe(_ainvoke(), bg_loop)
+        if heartbeat is not None:
+            from src.graphs.progress import resolve_with_heartbeat
+            result = resolve_with_heartbeat(fut, heartbeat[0], heartbeat[1])
+        else:
+            result = fut.result()
     else:
         result = asyncio.run(_ainvoke())
 
@@ -273,6 +279,7 @@ def _research(state: IaCState, model, tools_cache: dict) -> dict[str, Any]:
             model,
             tools=active_tools,
             _bg_loop_cache=tools_cache,
+            heartbeat=("iac-agent", "research"),
         )
     emit_progress(
         "iac-agent",
@@ -341,7 +348,8 @@ def _generate(state: IaCState, model, _bg_loop_cache: dict | None = None) -> dic
         "agent.role": "code_generator",
         "agent.research_context_length": len(research),
     }):
-        response, vfs_files = _run_agent(_GENERATE_PROMPT, user_msg, model, _bg_loop_cache=_bg_loop_cache)
+        response, vfs_files = _run_agent(_GENERATE_PROMPT, user_msg, model, _bg_loop_cache=_bg_loop_cache,
+                                         heartbeat=("iac-agent", "generate"))
 
     tf_content = _parse_hcl_blocks(response)
     # The mini-agent sometimes writes its output with the filesystem tools

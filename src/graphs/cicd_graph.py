@@ -93,7 +93,8 @@ You will receive the actionlint error output. Your job:
 
 
 def _run_agent(
-    system_prompt: str, user_message: str, model, backend=None
+    system_prompt: str, user_message: str, model, backend=None,
+    heartbeat: tuple[str, str] | None = None,
 ) -> tuple[str, dict]:
     """Create a mini DeepAgent, invoke it, and return (final AI text, VFS files).
 
@@ -133,7 +134,12 @@ def _run_agent(
 
     bg_loop = _code_interpreter_cache.get("loop")
     if bg_loop is not None and bg_loop.is_running():
-        result = asyncio.run_coroutine_threadsafe(_ainvoke(), bg_loop).result()
+        fut = asyncio.run_coroutine_threadsafe(_ainvoke(), bg_loop)
+        if heartbeat is not None:
+            from src.graphs.progress import resolve_with_heartbeat
+            result = resolve_with_heartbeat(fut, heartbeat[0], heartbeat[1])
+        else:
+            result = fut.result()
     else:
         result = asyncio.run(_ainvoke())
 
@@ -204,7 +210,8 @@ def _generate(state: CICDState, model) -> dict[str, Any]:
         "agent.node": "generate",
         "agent.role": "code_generator",
     }):
-        response, vfs_files = _run_agent(_GENERATE_PROMPT, f"## Task\n{task}", model)
+        response, vfs_files = _run_agent(_GENERATE_PROMPT, f"## Task\n{task}", model,
+                                         heartbeat=("cicd-agent", "generate"))
 
     workflow_content = _parse_yaml_blocks(response)
     # The mini-agent sometimes writes its output with the filesystem tools
