@@ -157,18 +157,21 @@ def _resolve_anthropic_key() -> None:
 _resolve_anthropic_key()
 
 # One shared model for every sub-agent graph on the co-located server.
-# Thinking stays ON (model default): disabling it measurably degraded
-# generation quality (iac burned all 3 fix attempts on runs that used to pass
-# first try). SanitizedChatAnthropic strips the empty thinking blocks that
-# otherwise 400 on replay ("thinking.thinking: Field required") — see
-# src/anthropic_model.py.
+# Thinking is explicitly DISABLED for latency (adaptive thinking generates
+# reasoning tokens before the visible output). NOTE: disabling it previously
+# degraded generation quality — iac burned all 3 fix attempts on runs that
+# used to pass first try — so watch the self-heal loops; re-enable by removing
+# the `thinking` kwarg (model default is adaptive thinking ON) if quality drops.
+# SanitizedChatAnthropic still strips any empty thinking blocks from replayed
+# history as a safety net — see src/anthropic_model.py.
 # max_tokens MUST be explicit: without langchain-model-profiles installed,
-# ChatAnthropic falls back to 4096, and adaptive thinking consumes that
-# budget before the visible output — responses truncated mid-fence
-# ("Generated 0 workflow file(s)") and burned entire self-heal budgets.
+# ChatAnthropic falls back to 4096, and responses truncate mid-fence
+# ("Generated 0 workflow file(s)") and burn entire self-heal budgets.
 # Verified: the same generate prompt yields both complete workflow files at
 # 32k where it produced a 370-char stub at the 4096 fallback.
-_model = SanitizedChatAnthropic(model=_MODEL_NAME, max_tokens=64000)
+_model = SanitizedChatAnthropic(
+    model=_MODEL_NAME, max_tokens=64000, thinking={"type": "disabled"}
+)
 
 # Module-level compiled graph handles referenced by langgraph.json.
 # graph_id values ("iac" / "cicd" / "data-eng") match the AsyncSubAgent specs.

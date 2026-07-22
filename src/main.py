@@ -43,16 +43,19 @@ async def build_agent():
     if not MEMORY_ID:
         raise RuntimeError("AGENTCORE_MEMORY_ID environment variable is required")
 
-    # Thinking stays ON (model default). SanitizedChatAnthropic strips the
-    # empty thinking blocks claude-sonnet-5 sometimes emits, which otherwise
-    # 400 when the checkpointed history is replayed on a later turn
-    # ("thinking.thinking: Field required") — see src/anthropic_model.py.
+    # Thinking is explicitly DISABLED for latency: adaptive thinking generates
+    # reasoning tokens before any visible output, which dominated response
+    # start-time. SanitizedChatAnthropic still strips any empty thinking blocks
+    # from replayed history as a safety net — see src/anthropic_model.py.
+    # (Re-enable by removing the `thinking` kwarg if generation quality drops;
+    # the model default is adaptive thinking ON.)
     # max_tokens MUST be explicit (the profiles package is absent, so the
     # library falls back to 4096 — far too small for the Supervisor's
     # submit_pr call, whose args inline every generated file).
     model = SanitizedChatAnthropic(
         model="claude-sonnet-5",
         max_tokens=64000,
+        thinking={"type": "disabled"},
     )
 
     # Async sub-agent specs. A spec containing `graph_id` triggers deepagents to
