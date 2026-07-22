@@ -27,6 +27,13 @@ from src.tracing.utils import traced_span
 
 logger = logging.getLogger(__name__)
 
+# The four files the generator must always produce; the missing-guard and the
+# report's integrity check require these. The model MAY additionally split
+# resources into extra files (e.g. iam.tf, s3.tf) — those are captured by
+# _parse_hcl_blocks and must be written to the sandbox and included in the PR
+# too, so validate/report iterate over ALL of tf_content, not just these four.
+_REQUIRED_TF_FILES = ("provider.tf", "variables.tf", "main.tf", "outputs.tf")
+
 # --- System prompts for agent nodes ---
 
 _RESEARCH_PROMPT = """\
@@ -378,10 +385,7 @@ def _validate(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None 
     # the sandbox and terraform plan can pass on a partial config, producing
     # a PASSED report with missing files. Fail fast so the fix loop
     # regenerates the fenced blocks instead.
-    missing = [
-        f for f in ("provider.tf", "variables.tf", "main.tf", "outputs.tf")
-        if not tf_content.get(f)
-    ]
+    missing = [f for f in _REQUIRED_TF_FILES if not tf_content.get(f)]
     if missing:
         output = (
             "VALIDATION: FAILED\n"
@@ -398,9 +402,14 @@ def _validate(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None 
     # HCL is full of double quotes and ${...} interpolations, both of which
     # the shell mangles inside a double-quoted command. Base64 is pure
     # [A-Za-z0-9+/=], so the payload survives the shell untouched.
+    # Write EVERY generated file — not just the required four. The model often
+    # splits resources into extra files (iam.tf, s3.tf, …); dropping them here
+    # left main.tf/outputs.tf referencing undeclared resources, so terraform
+    # plan failed and burned the whole self-heal budget.
     import base64
     write_cmds = "mkdir -p /infra"
-    for fname in ["provider.tf", "variables.tf", "main.tf", "outputs.tf"]:
+    written_files = [f for f, c in tf_content.items() if c]
+    for fname in written_files:
         content = tf_content.get(fname, "")
         b64 = base64.b64encode(content.encode()).decode()
         write_cmds += (
@@ -409,7 +418,7 @@ def _validate(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None 
             f'.write(base64.b64decode("{b64}"))\''
         )
 
-    files_list = ", ".join(artifacts.values()) if artifacts else "unknown"
+    files_list = ", ".join(f"/infra/{f}" for f in written_files) or "unknown"
 
     user_msg = (
         f"## Step 1: Write generated files into the sandbox\n"
@@ -508,35 +517,41 @@ def _report(state: IaCState) -> dict[str, Any]:
     artifacts = state.get("tf_artifacts", {})
     tf_content = state.get("tf_content", {})
 
-    files_list = ", ".join(artifacts.keys()) if artifacts else "none"
+    # Order the required files first, then any extra generated files (iam.tf, …).
+    ordered_files = list(_REQUIRED_TF_FILES) + [
+        f for f in tf_content if f not in _REQUIRED_TF_FILES
+    ]
 
-    # Human-readable fenced blocks for context
+    files_list = ", ".join(f for f in ordered_files if tf_content.get(f)) or "none"
+
+    # Human-readable fenced blocks for context — every generated file.
     file_contents = ""
-    for fname in ["provider.tf", "variables.tf", "main.tf", "outputs.tf"]:
+    for fname in ordered_files:
         content = tf_content.get(fname, "")
         if content:
             file_contents += f"\n\n### {fname}\n```hcl\n{content}\n```"
-        else:
+        elif fname in _REQUIRED_TF_FILES:
             file_contents += f"\n\n### {fname}\n(content unavailable)"
 
     # Structured JSON block at the end — the orchestrator extracts files from
     # this block directly instead of parsing fenced HCL blocks, which is
     # fragile when reports are long or content contains special characters.
-    # Keys match the target file paths expected by submit_pr.
+    # Keys match the target file paths expected by submit_pr. Include EVERY
+    # generated file (iam.tf, s3.tf, …), not just the required four — otherwise
+    # a passing config with a split-out iam.tf would open an incomplete PR.
     pr_files = {
-        f"infra/{fname}": tf_content.get(fname, "")
-        for fname in ["provider.tf", "variables.tf", "main.tf", "outputs.tf"]
-        if tf_content.get(fname)
+        f"infra/{fname}": content
+        for fname, content in tf_content.items()
+        if content
     }
 
-    # Integrity guard: a PASSED report with an incomplete PR_FILES_JSON is a
-    # lie the orchestrator would turn into a broken PR. Downgrade to FAILED.
-    expected = {
-        f"infra/{f}" for f in ("provider.tf", "variables.tf", "main.tf", "outputs.tf")
-    }
-    if passed and set(pr_files) != expected:
+    # Integrity guard: a PASSED report missing any REQUIRED file is a lie the
+    # orchestrator would turn into a broken PR. Downgrade to FAILED. Extra
+    # files beyond the required four are allowed (subset check, not equality).
+    required_paths = {f"infra/{f}" for f in _REQUIRED_TF_FILES}
+    if passed and not required_paths.issubset(set(pr_files)):
         passed = False
-        missing_files = ", ".join(sorted(p.rsplit("/", 1)[-1] for p in expected - set(pr_files)))
+        missing_files = ", ".join(sorted(p.rsplit("/", 1)[-1] for p in required_paths - set(pr_files)))
         validation_output = (
             f"Validation reported success but file content is missing for: {missing_files}. "
             "The generated Terraform content was never captured — do not submit these files."
