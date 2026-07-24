@@ -96,6 +96,33 @@ CONTINUATION_DIRECTIVE = (
 )
 
 
+def _iter_submit_pr_results(messages) -> list:
+    """Return the submit_pr ToolMessage(s) from a finalized message history.
+
+    The v3 ``stream_events`` ``messages`` projection consumed by
+    ``_stream_producer`` surfaces the Supervisor's LLM messages but NOT
+    ToolMessages (see the "NOTE on ToolMessage surfacing" above). So the
+    ``submit_pr`` RESULT — the PR URL — never reaches the proxy on its own, and
+    the proxy's deterministic PR-link injection (which keys off a
+    ``type == "tool"`` result for the submit_pr call) can never fire. That is
+    what forces the user to ask for the link in a second turn.
+
+    The finalized run state (``run.output()``) DOES contain the submit_pr
+    ToolMessage, so recovering it here and re-emitting it into the stream lets
+    the proxy surface the PR link in the chat automatically. Match by tool name,
+    falling back to any ToolMessage whose content carries a PR URL.
+    """
+    results = []
+    for m in messages or []:
+        if getattr(m, "type", None) != "tool":
+            continue
+        content = getattr(m, "content", "")
+        content_str = content if isinstance(content, str) else str(content)
+        if getattr(m, "name", None) == "submit_pr" or "/pull/" in content_str:
+            results.append(m)
+    return results
+
+
 def _merge_tool_call_fragments(partial: dict, dumped: dict) -> list[dict]:
     """Merge streamed tool-call fragments (by index) and return the current view.
 
@@ -825,6 +852,14 @@ async def invocations(payload, context: RequestContext):
                         values = await run.output()
                         if isinstance(values, dict):
                             final_state["values"] = values
+                            # The v3 messages projection never streams the
+                            # submit_pr ToolMessage, so the proxy's PR-link
+                            # injection can't fire and the link only appears if
+                            # the user asks in a second turn. Re-emit the
+                            # submit_pr result from the finalized state so the
+                            # PR URL lands in the chat automatically.
+                            for tm in _iter_submit_pr_results(values.get("messages")):
+                                _emit(tm, "orchestrator")
                     except Exception as exc:
                         logger.warning("Could not capture final run values: %s", exc)
             except Exception as exc:
