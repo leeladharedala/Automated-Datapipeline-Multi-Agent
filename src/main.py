@@ -51,10 +51,13 @@ async def build_agent():
     # the model default is adaptive thinking ON.)
     # max_tokens MUST be explicit (the profiles package is absent, so the
     # library falls back to 4096 — far too small for the Supervisor's
-    # submit_pr call, whose args inline every generated file).
+    # submit_pr call, whose args inline every generated file). Set to the
+    # claude-sonnet-5 output ceiling (128000) — the API requires the field, so
+    # this is "uncapped" in practice. Note: it's an upper bound, not a target;
+    # raising it does not change latency for responses that finish sooner.
     model = SanitizedChatAnthropic(
         model="claude-sonnet-5",
-        max_tokens=64000,
+        max_tokens=128000,
         thinking={"type": "disabled"},
     )
 

@@ -189,11 +189,16 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
     # is never closed between calls (avoids httpx TLS cleanup errors).
     bg_loop = (_bg_loop_cache or {}).get("loop")
     if bg_loop is not None and bg_loop.is_running():
-        fut = asyncio.run_coroutine_threadsafe(_ainvoke(), bg_loop)
         if heartbeat is not None:
-            from src.graphs.progress import resolve_with_heartbeat
-            result = resolve_with_heartbeat(fut, heartbeat[0], heartbeat[1])
+            # Stream the mini-agent so its internal tool calls (write_file,
+            # execute, MCP research) show up on the dashboard in realtime
+            # instead of only a "still working" tick.
+            from src.graphs.progress import run_agent_with_live_progress
+            result = run_agent_with_live_progress(
+                agent, user_message, bg_loop, heartbeat[0], heartbeat[1]
+            )
         else:
+            fut = asyncio.run_coroutine_threadsafe(_ainvoke(), bg_loop)
             result = fut.result()
     else:
         result = asyncio.run(_ainvoke())
@@ -205,6 +210,51 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
             from src.graphs._utils import _content_to_str
             return _content_to_str(msg.content), vfs_files
     return "", vfs_files
+
+
+def _start_mcp_prewarm(tools_cache: dict) -> None:
+    """Kick off the Terraform Registry + AWS Docs MCP tool load in the background
+    at graph-build time (server startup), so the research node doesn't pay the
+    ~120s cold start on the critical path.
+
+    Spins up a dedicated event loop in a daemon thread (MCP stdio clients need a
+    long-lived loop for their subprocess connections) and schedules the load.
+    Stores the loop and the in-flight future in ``tools_cache``; a done-callback
+    populates ``tools`` / ``clients`` when the load completes. Best-effort — any
+    failure just leaves the cache empty and the research node lazy-loads as before.
+    """
+    import asyncio
+    import threading
+    try:
+        from src.tools.gateway import load_gateway_tools
+
+        loop = asyncio.new_event_loop()
+
+        def _run_loop():
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+
+        threading.Thread(target=_run_loop, daemon=True).start()
+        future = asyncio.run_coroutine_threadsafe(load_gateway_tools(), loop)
+        tools_cache["loop"] = loop
+        tools_cache["prewarm_future"] = future
+
+        def _on_done(fut):
+            try:
+                clients, active_tools = fut.result()
+                tools_cache["tools"] = active_tools
+                tools_cache["clients"] = clients
+                logger.info(
+                    "Pre-warmed %d MCP tools (Terraform Registry + AWS Docs)",
+                    len(active_tools),
+                )
+            except Exception as exc:
+                logger.warning("MCP tool pre-warm failed (research will lazy-load): %s", exc)
+
+        future.add_done_callback(_on_done)
+        logger.info("Started MCP tool pre-warm in background...")
+    except Exception as exc:
+        logger.warning("Could not start MCP tool pre-warm: %s", exc)
 
 
 def _research(state: IaCState, model, tools_cache: dict) -> dict[str, Any]:
@@ -226,8 +276,24 @@ def _research(state: IaCState, model, tools_cache: dict) -> dict[str, Any]:
         emit_progress("iac-agent", "[research] No task description provided; skipping research.")
         return {"research_context": "No task provided."}
 
-    # Lazy-load MCP tools if none were provided at build time
+    # MCP tools: prefer the background pre-warm started at graph-build time so
+    # research doesn't pay the ~120s cold start on the critical path. If the
+    # pre-warm is still in flight, wait on it rather than starting a duplicate
+    # load; if it already finished, tools_cache["tools"] is populated and we
+    # skip straight past.
     active_tools = tools_cache.get("tools", [])
+    if not active_tools:
+        prewarm = tools_cache.get("prewarm_future")
+        if prewarm is not None:
+            try:
+                clients, active_tools = prewarm.result(timeout=120)
+                tools_cache["tools"] = active_tools
+                tools_cache["clients"] = clients
+            except Exception as exc:
+                logger.warning("MCP pre-warm did not complete; skipping research: %s", exc)
+                emit_progress("iac-agent", "[research] MCP research tools unavailable; skipping research phase.")
+                return {"research_context": "MCP tools unavailable; skipping research phase."}
+    # Fallback: no pre-warm was started (or it left the cache empty) — lazy-load.
     if not active_tools:
         try:
             from src.tools.gateway import load_gateway_tools
@@ -415,7 +481,21 @@ def _validate(state: IaCState, model, sandbox=None, _bg_loop_cache: dict | None 
     # left main.tf/outputs.tf referencing undeclared resources, so terraform
     # plan failed and burned the whole self-heal budget.
     import base64
-    write_cmds = "mkdir -p /infra"
+    # Persistent Terraform provider plugin cache. Writing ~/.terraformrc once
+    # (it survives across execute calls and across runs in the reused sandbox
+    # session) makes every `terraform init` after the first reuse the cached AWS
+    # provider instead of re-downloading it — the biggest fixed cost in the iac
+    # path, paid again on each fix→validate retry. plugin_cache_may_break_
+    # dependency_lock_file avoids the missing-lock-file error when the cache is
+    # the only provider source.
+    tf_cache_setup = (
+        'H="${HOME:-/root}"'
+        ' && mkdir -p "$H/.terraform.d/plugin-cache"'
+        ' && printf \'plugin_cache_dir = "%s"\\n'
+        'plugin_cache_may_break_dependency_lock_file = true\\n\''
+        ' "$H/.terraform.d/plugin-cache" > "$H/.terraformrc"'
+    )
+    write_cmds = f"{tf_cache_setup} && mkdir -p /infra"
     written_files = [f for f, c in tf_content.items() if c]
     for fname in written_files:
         content = tf_content.get(fname, "")
@@ -613,6 +693,12 @@ def build_iac_graph(model, tools=None):
     # Closures capture model and tools from factory args
     # Cache for lazily-loaded MCP tools (loaded once on first research call)
     _cached_tools: dict[str, Any] = {"tools": tools or [], "clients": None}
+
+    # If no tools were supplied at build time, start loading them NOW in the
+    # background so the first research call finds them ready instead of stalling
+    # ~120s on the cold MCP load. The research node consumes the in-flight future.
+    if not tools:
+        _start_mcp_prewarm(_cached_tools)
 
     # Load Code Interpreter sandbox for validate/fix nodes
     from src.sandbox import get_local_shell_backend

@@ -134,11 +134,16 @@ def _run_agent(
 
     bg_loop = _code_interpreter_cache.get("loop")
     if bg_loop is not None and bg_loop.is_running():
-        fut = asyncio.run_coroutine_threadsafe(_ainvoke(), bg_loop)
         if heartbeat is not None:
-            from src.graphs.progress import resolve_with_heartbeat
-            result = resolve_with_heartbeat(fut, heartbeat[0], heartbeat[1])
+            # Stream the mini-agent so its internal tool calls (write_file,
+            # edit_file, execute) show up on the dashboard in realtime instead
+            # of only a "still working" tick.
+            from src.graphs.progress import run_agent_with_live_progress
+            result = run_agent_with_live_progress(
+                agent, user_message, bg_loop, heartbeat[0], heartbeat[1]
+            )
         else:
+            fut = asyncio.run_coroutine_threadsafe(_ainvoke(), bg_loop)
             result = fut.result()
     else:
         result = asyncio.run(_ainvoke())
@@ -279,31 +284,60 @@ def _validate(state: CICDState, model, sandbox=None) -> dict[str, Any]:
 
     files_list = ", ".join(artifacts.values()) if artifacts else "unknown"
 
-    user_msg = (
-        f"## Step 1: Write generated files into the sandbox\n"
-        f"Run this exact command using execute:\n"
-        f"```\n{write_cmds}\n```\n\n"
-        f"## Step 2: Run actionlint validation\n"
-        f"## Task\n{task}\n\n"
-        f"## Generated Files\n{files_list}\n\n"
-        "After writing the files, run actionlint validation now."
-    )
     with traced_span("agent:cicd.validate", {
         "agent.graph": "cicd",
         "agent.node": "validate",
         "agent.role": "validator",
     }):
-        response, _ = _run_agent(_VALIDATE_PROMPT, user_msg, model, backend=sandbox)
-
-    # Check for explicit PASSED/FAILED keywords from the prompt.
-    # Avoid matching generic "success" which can appear in failure context.
-    upper = response.upper()
-    if "VALIDATION FAILED" in upper or "VALIDATION: FAILED" in upper:
-        passed = False
-    elif "VALIDATION PASSED" in upper or "VALIDATION: PASSED" in upper:
-        passed = True
-    else:
-        passed = "PASSED" in upper and "FAILED" not in upper
+        if sandbox is not None:
+            # Deterministic validation: actionlint is a fast, exit-code-driven
+            # linter, so run it directly on the backend instead of spending a
+            # full LLM turn to drive `execute` and paraphrase the result — the
+            # same round-trip was paid again on every fix retry. Mirrors the
+            # data-eng validate, which also runs its check without an LLM. The
+            # ObservabilityLocalShellBackend still streams the command + output
+            # to the dashboard, so live visibility is unchanged.
+            try:
+                write_res = sandbox.execute(write_cmds)
+                if write_res.exit_code != 0:
+                    passed = False
+                    response = (
+                        "VALIDATION: FAILED\nFailed to write workflow files "
+                        f"into the sandbox:\n{write_res.output}"
+                    )
+                else:
+                    lint = sandbox.execute(
+                        "actionlint /.github/workflows/deploy.yml "
+                        "/.github/workflows/destroy.yml"
+                    )
+                    passed = lint.exit_code == 0
+                    response = (
+                        "VALIDATION: PASSED\nactionlint completed successfully."
+                        if passed
+                        else f"VALIDATION: FAILED\nactionlint reported errors:\n{lint.output}"
+                    )
+            except Exception as exc:  # exec failure → fail into the fix loop
+                passed = False
+                response = f"VALIDATION: FAILED\nSandbox execution error: {exc}"
+        else:
+            # No backend (degenerate path) — fall back to the LLM-driven check.
+            user_msg = (
+                f"## Step 1: Write generated files into the sandbox\n"
+                f"Run this exact command using execute:\n"
+                f"```\n{write_cmds}\n```\n\n"
+                f"## Step 2: Run actionlint validation\n"
+                f"## Task\n{task}\n\n"
+                f"## Generated Files\n{files_list}\n\n"
+                "After writing the files, run actionlint validation now."
+            )
+            response, _ = _run_agent(_VALIDATE_PROMPT, user_msg, model, backend=sandbox)
+            upper = response.upper()
+            if "VALIDATION FAILED" in upper or "VALIDATION: FAILED" in upper:
+                passed = False
+            elif "VALIDATION PASSED" in upper or "VALIDATION: PASSED" in upper:
+                passed = True
+            else:
+                passed = "PASSED" in upper and "FAILED" not in upper
 
     if passed:
         emit_progress("cicd-agent", "[validate] actionlint validation PASSED.")

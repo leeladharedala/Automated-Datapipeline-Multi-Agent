@@ -145,11 +145,17 @@ def _invoke_agent(agent, user_message: str, thread_id: str | None = None,
         _code_interpreter_cache["loop"] = _bg_loop
 
     bg_loop = _code_interpreter_cache["loop"]
-    fut = asyncio.run_coroutine_threadsafe(_ainvoke(), bg_loop)
     if heartbeat is not None:
-        from src.graphs.progress import resolve_with_heartbeat
-        result = resolve_with_heartbeat(fut, heartbeat[0], heartbeat[1])
+        # Stream the agent so its internal tool calls (sample data, write_file,
+        # execute PySpark checks) reach the dashboard in realtime rather than a
+        # single "still working" tick per phase.
+        from src.graphs.progress import run_agent_with_live_progress
+        result = run_agent_with_live_progress(
+            agent, user_message, bg_loop, heartbeat[0], heartbeat[1],
+            invoke_config=invoke_config,
+        )
     else:
+        fut = asyncio.run_coroutine_threadsafe(_ainvoke(), bg_loop)
         result = fut.result()
 
     for msg in reversed(result["messages"]):

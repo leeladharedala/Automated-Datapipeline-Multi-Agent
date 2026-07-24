@@ -169,8 +169,11 @@ _resolve_anthropic_key()
 # ("Generated 0 workflow file(s)") and burn entire self-heal budgets.
 # Verified: the same generate prompt yields both complete workflow files at
 # 32k where it produced a 370-char stub at the 4096 fallback.
+# Set to the claude-sonnet-5 output ceiling (128000) — the API requires the
+# field, so this is effectively "uncapped". It's an upper bound, not a target:
+# raising it does not speed up responses that finish before the cap.
 _model = SanitizedChatAnthropic(
-    model=_MODEL_NAME, max_tokens=64000, thinking={"type": "disabled"}
+    model=_MODEL_NAME, max_tokens=128000, thinking={"type": "disabled"}
 )
 
 # Module-level compiled graph handles referenced by langgraph.json.
