@@ -12,6 +12,11 @@ langchain-anthropic>=1.4.3         # deepagents 0.6.8 requires >=1.4.3
 langchain-google-genai>=4.2.2      # newly mandatory transitive dep of deepagents 0.6.x
 langchain-openai>=1.1.0
 langchain-mcp-adapters>=0.2.0
+# mcp 2.0 removed RequestContext from mcp.shared.context, but langchain-mcp-adapters
+# 0.3.1 (latest) still imports it and only declares mcp>=1.24.0 — unpinned, pip picks
+# 2.0.0 and `from langchain_mcp_adapters.client import MultiServerMCPClient` ImportErrors.
+# Lift the cap only once langchain-mcp-adapters ships mcp 2.x support.
+mcp>=1.24.0,<2.0.0
 nest_asyncio>=1.6.0
 
 # CopilotKit AG-UI integration
