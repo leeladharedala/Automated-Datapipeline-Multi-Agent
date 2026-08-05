@@ -3,7 +3,7 @@
 # ──────────────────────────────────────────────────────────────
 
 resource "aws_s3_bucket" "raw_data" {
-  bucket        = "${var.project_name}-${var.environment}-raw-data"
+  bucket        = "${var.project_name}-${var.environment}-raw-data-${local.account_id}"
   force_destroy = var.environment != "prod"
 }
 

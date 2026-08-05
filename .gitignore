@@ -58,6 +58,7 @@ ENV/
 *.tfvars
 *.tfvars.json
 .terraform.lock.hcl
+backend.hcl
 override.tf
 override.tf.json
 *_override.tf
