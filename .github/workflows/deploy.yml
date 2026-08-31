@@ -1,11 +1,17 @@
 # ──────────────────────────────────────────────────────────────
 # Deploy Pipeline
 #
-# Triggers: push to master, manual dispatch
+# Triggers: push to master, pull request into master, manual dispatch
 # Steps:
 #   1. Build & push Docker image to ECR
 #   2. Sync Anthropic API key → Secrets Manager
 #   3. Terraform init (remote S3 state) → plan → apply
+#
+# On a pull request this is a DRY RUN: build the image and run
+# fmt/validate/plan, then stop. Apply, the raw_data sync and the secret
+# writes are gated on `github.event_name != 'pull_request'`, so a PR proves
+# the image builds and the plan is clean without mutating the environment.
+# PR builds are also tagged with the SHA only — `latest` moves on master.
 # ──────────────────────────────────────────────────────────────
 
 name: Deploy AgentCore Pipeline
@@ -13,6 +19,17 @@ name: Deploy AgentCore Pipeline
 on:
   push:
     branches: [master]
+    paths:
+      - "src/**"
+      - "Dockerfile"
+      - "pyproject.toml"
+      - "requirements.txt"
+      - "infra/**"
+      - ".github/workflows/deploy.yml"
+      - "raw_data/**"
+  pull_request:
+    branches: [master]
+    types: [opened, reopened, synchronize]
     paths:
       - "src/**"
       - "Dockerfile"
@@ -31,8 +48,11 @@ on:
         options: [dev, staging, prod]
 
 concurrency:
-  group: deploy-${{ inputs.environment || 'dev' }}
-  cancel-in-progress: false
+  # PR dry runs get their own lane per PR: they must never queue behind — or
+  # hold up — a real master deploy of the same environment. Superseded PR runs
+  # are cancelled; master deploys are never cancelled mid-apply.
+  group: deploy-${{ inputs.environment || 'dev' }}-${{ github.event.pull_request.number || 'master' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -88,6 +108,15 @@ jobs:
           IMAGE_TAG="${{ github.sha }}"
           echo "ecr_repo=${ECR_REPO}" >> "$GITHUB_OUTPUT"
           echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          # A PR must not repoint `latest` at unmerged code — SHA tag only.
+          {
+            echo "tags<<TAGS_EOF"
+            echo "${ECR_REPO}:${IMAGE_TAG}"
+            if [ "${{ github.event_name }}" != "pull_request" ]; then
+              echo "${ECR_REPO}:latest"
+            fi
+            echo "TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -98,9 +127,7 @@ jobs:
           context: .
           push: true
           platforms: linux/arm64
-          tags: |
-            ${{ steps.meta.outputs.ecr_repo }}:${{ steps.meta.outputs.image_tag }}
-            ${{ steps.meta.outputs.ecr_repo }}:latest
+          tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
@@ -212,9 +239,11 @@ jobs:
           retention-days: 30
 
       - name: Terraform Apply
+        if: github.event_name != 'pull_request'
         run: terraform apply -auto-approve -input=false tfplan
 
       - name: Sync raw data to S3
+        if: github.event_name != 'pull_request'
         working-directory: ${{ github.workspace }}
         run: |
           if [ -d "raw_data" ]; then
@@ -225,7 +254,17 @@ jobs:
             echo "ℹ️ raw_data/ directory not found — skipping sync"
           fi
 
+      - name: Plan summary (pull request dry run)
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "## 🔍 Dry run — plan only" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Image built and pushed as \`${{ needs.build-and-push.outputs.image_tag }}\`;" \
+               "Terraform validated and planned. No apply, no raw_data sync," \
+               "no secret writes — those run on merge to master." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Output deployment info
+        if: github.event_name != 'pull_request'
         run: |
           echo "## 🚀 Deployment Complete" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
@@ -257,6 +296,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     needs: [terraform-deploy]
+    # Never rotate live secrets from an unmerged branch.
+    if: github.event_name != 'pull_request'
 
     steps:
       - name: Sync Anthropic API key
