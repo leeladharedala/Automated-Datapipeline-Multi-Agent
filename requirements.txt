@@ -19,6 +19,17 @@ langchain-mcp-adapters>=0.2.0
 mcp>=1.24.0,<2.0.0
 nest_asyncio>=1.6.0
 
+# Programmatic tool calling (PTC) for the iac research node — the QuickJS
+# interpreter middleware (`CodeInterpreterMiddleware`), wired in
+# src/graphs/interpreter.py. BETA upstream, so every use site degrades to
+# direct tool calling when the import or construction fails.
+# The upper cap is load-bearing: 0.3.3+ requires deepagents>=0.6.12 while this
+# image is pinned to deepagents==0.6.8. Lift it only with the deepagents pin.
+# It also raises the effective langchain-core floor to >=1.4.7.
+# Pulls quickjs-rs (QuickJS compiled to WASM) + wasmtime; both publish
+# manylinux2014_aarch64 wheels, so the ARM64 image needs no build toolchain.
+langchain-quickjs>=0.3.0,<0.3.3
+
 # CopilotKit AG-UI integration
 copilotkit>=0.1.94
 

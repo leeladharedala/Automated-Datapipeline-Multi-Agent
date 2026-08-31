@@ -52,6 +52,7 @@ import fastapi; print(f'fastapi {fastapi.__version__}'); \
 import bedrock_agentcore; print('bedrock-agentcore OK'); \
 from langchain_anthropic import ChatAnthropic; print('ChatAnthropic OK'); \
 from langchain_mcp_adapters.client import MultiServerMCPClient; print('MCP adapters OK'); \
+from langchain_quickjs import CodeInterpreterMiddleware; print('CodeInterpreterMiddleware (PTC) OK'); \
 from langchain.agents.middleware.types import AgentMiddleware; print('AgentMiddleware OK'); \
 from deepagents import create_deep_agent; print('create_deep_agent OK'); \
 from deepagents import AsyncSubAgent, AsyncSubAgentMiddleware; print('AsyncSubAgent OK'); \
