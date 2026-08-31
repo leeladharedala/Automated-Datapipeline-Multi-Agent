@@ -54,6 +54,45 @@ argument types, and any gotchas or constraints from the docs.
 Respond with a structured summary of your findings.
 """
 
+# PTC variant of the research prompt. Here the MCP tools are NOT on the tool
+# list — they are bridged into the QuickJS interpreter as `tools.*` (see
+# src/graphs/interpreter.py), so raw provider-schema payloads stay inside the
+# interpreter and only the distilled digest returns to the model context.
+_RESEARCH_PROMPT_PTC = """\
+You are a Terraform research specialist. Terraform Registry and AWS \
+Documentation MCP tools are NOT available as direct tool calls — they are \
+exposed inside the `eval` JavaScript interpreter under the `tools` namespace \
+(camelCase names), and `eval` is how you must reach them.
+
+Given the task description below, research the AWS resource types, arguments, \
+and best practices needed to implement the requested infrastructure:
+1. Look up the correct Terraform resource types and their required/optional arguments
+2. Find AWS documentation for the services involved
+3. Identify any dependencies between resources (e.g., IAM roles needed for Lambda)
+
+How to use `eval` well here:
+- Fan out with `Promise.all` over every resource type you need in ONE `eval`, \
+rather than one lookup per turn.
+- Do the reading INSIDE the interpreter: slice, filter, and reshape each raw \
+payload down to the fields you actually need (resource type name, argument \
+name, type, required/optional, constraints).
+- Return a compact object or string as the last expression — that value is all \
+you get back, so make it the research digest, not the raw documents. Never \
+return whole documentation pages.
+- If a lookup throws, catch it and keep the rest of the batch (`Promise.allSettled` \
+or a try/catch per call); a single failed lookup must not lose the others.
+- Chain dependent lookups in the same script: use the result of a provider \
+search to drive the follow-up schema fetch, no round trip through me needed.
+
+Be thorough — the code generator that follows will rely entirely on your research \
+to produce valid Terraform. Include resource type names, required arguments, \
+argument types, and any gotchas or constraints from the docs.
+
+When your research is done, respond with a structured summary of your findings \
+in your final message. The generator reads that message, not your interpreter \
+state, so restate everything that matters there.
+"""
+
 _GENERATE_PROMPT = """\
 You are a Terraform IaC code generator. You have access to write_file and \
 read_file tools that write to a shared VFS (persisted by AgentCore Memory).
@@ -153,13 +192,16 @@ Never introduce any `file*()` call on a local path.
 
 def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend=None,
                _bg_loop_cache: dict | None = None,
-               heartbeat: tuple[str, str] | None = None) -> tuple[str, dict]:
+               heartbeat: tuple[str, str] | None = None,
+               middleware=None) -> tuple[str, dict]:
     """Create a mini DeepAgent, invoke it, and return (final AI text, VFS files).
 
     This gives the agent access to the full DeepAgent tool stack:
     write_file, edit_file, read_file, execute, ls, glob, grep.
     Tools passed via the `tools` parameter are added on top.
     Pass a backend (e.g. AgentCoreSandbox) to enable the execute tool.
+    Pass `middleware` (e.g. the PTC interpreter from src/graphs/interpreter.py)
+    to extend the agent — deepagents appends it to its own middleware stack.
 
     Uses ainvoke (async) to support tools that only implement async invocation
     (e.g. MCP StructuredTools from langchain-mcp-adapters).
@@ -178,6 +220,8 @@ def _run_agent(system_prompt: str, user_message: str, model, tools=None, backend
     )
     if backend is not None:
         kwargs["backend"] = backend
+    if middleware:
+        kwargs["middleware"] = list(middleware)
     kwargs["checkpointer"] = False  # disable checkpointing for inner agents
 
     agent = create_deep_agent(**kwargs)
@@ -327,10 +371,20 @@ def _research(state: IaCState, model, tools_cache: dict) -> dict[str, Any]:
         emit_progress("iac-agent", "[research] No research tools available; skipping research phase.")
         return {"research_context": "No research tools available."}
 
+    # Programmatic tool calling: bridge the MCP tools into the QuickJS
+    # interpreter instead of the tool list, so the model orchestrates the
+    # lookups in JS and only the digest it returns enters the context. Falls
+    # back to direct tool calling (ptc_middleware empty, direct_tools == the
+    # MCP tools) whenever the interpreter is off or unavailable.
+    from src.graphs.interpreter import build_ptc_middleware
+    ptc_middleware, direct_tools = build_ptc_middleware(active_tools, agent="iac-agent")
+    ptc_on = bool(ptc_middleware)
+
     emit_progress(
         "iac-agent",
         f"[research] Researching Terraform resource schemas and AWS docs "
-        f"({len(active_tools)} MCP tools available)...",
+        f"({len(active_tools)} MCP tools available, "
+        f"{'programmatic tool calling via eval' if ptc_on else 'direct tool calls'})...",
     )
 
     with traced_span("agent:iac.research", {
@@ -338,14 +392,16 @@ def _research(state: IaCState, model, tools_cache: dict) -> dict[str, Any]:
         "agent.node": "research",
         "agent.role": "researcher",
         "agent.tool_count": len(active_tools),
+        "agent.ptc": ptc_on,
     }):
         response, _ = _run_agent(
-            _RESEARCH_PROMPT,
+            _RESEARCH_PROMPT_PTC if ptc_on else _RESEARCH_PROMPT,
             f"## Task\n{task}\n\nResearch the AWS resources and Terraform configuration needed for this task.",
             model,
-            tools=active_tools,
+            tools=direct_tools,
             _bg_loop_cache=tools_cache,
             heartbeat=("iac-agent", "research"),
+            middleware=ptc_middleware,
         )
     emit_progress(
         "iac-agent",
